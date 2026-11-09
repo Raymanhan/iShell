@@ -1,6 +1,4 @@
 # iShell
-<center><img width="1521" height="905" alt="image" src="https://github.com/user-attachments/assets/ff290b86-4b9e-47b4-8678-b98a5c4e4e27" />
-</center>
 
 **An all-in-one SSH workbench with a built-in AI server assistant.**
 
@@ -8,7 +6,8 @@
 [![CI](https://github.com/Raymanhan/ishell/actions/workflows/ci.yml/badge.svg)](https://github.com/Raymanhan/ishell/actions/workflows/ci.yml)
 [![Build installers](https://github.com/Raymanhan/ishell/actions/workflows/release.yml/badge.svg)](https://github.com/Raymanhan/ishell/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-
+<center><img width="1521" height="905" alt="image" src="https://github.com/user-attachments/assets/ff290b86-4b9e-47b4-8678-b98a5c4e4e27" />
+</center>
 iShell is an open-source SSH desktop workbench for developers, operators, and self-hosters. Connect to your servers, work across split terminals, transfer files, edit configurations, follow logs, and inspect resource usage from a single window.
 
 The built-in **AI server assistant** turns deployment and troubleshooting requests into tool-assisted steps over the active SSH connection: run commands, read and write files, and generate and execute code, with visible output for each step. Connect your own OpenAI-compatible model service and choose the model, reasoning effort, and operation permissions.
