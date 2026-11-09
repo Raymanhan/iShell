@@ -10,6 +10,9 @@ import {
 } from "./preferences";
 import {
   applyAiEvent,
+  applyQueuedText,
+  queueText,
+  TEXT_BATCH_MS,
   defaultAiConfig,
   historyWriteDelay,
   createConversation,
@@ -23,6 +26,7 @@ import {
   type AiConversation,
   type AiEvent,
   type AiModel,
+  type QueuedText,
 } from "./types";
 
 import { t } from "../../i18n";
@@ -416,9 +420,31 @@ export function useAi(tabs: ShellTab[]) {
     void flushHistory();
     let assistantId = crypto.randomUUID();
     let compactionId = crypto.randomUUID();
+    // Tokens can arrive faster than the panel can usefully redraw, and each
+    // update re-renders the app. Text is batched; any other event, and the
+    // end of the request, applies what is waiting first so order is kept.
+    let queued: QueuedText[] = [];
+    let textTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushText = () => {
+      if (textTimer) clearTimeout(textTimer);
+      textTimer = null;
+      if (!queued.length) return;
+      const batch = queued;
+      queued = [];
+      update(id, (value) => ({
+        ...value,
+        entries: applyQueuedText(value.entries, batch),
+      }));
+    };
     const onEvent = new Channel<AiEvent>();
     onEvent.onmessage = (event) => {
       if (current.current[id]?.requestId !== requestId) return;
+      if (event.type === "text" || event.type === "thinking") {
+        queued = queueText(queued, event, assistantId);
+        if (!textTimer) textTimer = setTimeout(flushText, TEXT_BATCH_MS);
+        return;
+      }
+      flushText();
       if (event.type === "compaction_start") {
         compactionId = crypto.randomUUID();
         update(id, (value) => ({
@@ -471,6 +497,7 @@ export function useAi(tabs: ShellTab[]) {
         },
         onEvent,
       });
+      flushText();
       update(id, (value) => ({
         ...value,
         messages: result.messages,
@@ -498,6 +525,7 @@ export function useAi(tabs: ShellTab[]) {
         ],
       }));
     } catch (error) {
+      flushText();
       update(id, (value) => ({
         ...value,
         entries: [
@@ -506,6 +534,7 @@ export function useAi(tabs: ShellTab[]) {
         ],
       }));
     } finally {
+      flushText();
       automaticStops.current.delete(requestId);
       update(id, (value) => ({
         ...value,

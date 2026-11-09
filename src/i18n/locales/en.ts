@@ -571,6 +571,7 @@ const catalog: Record<string, string> = {
   "无结果": "No results",
   "显存": "GPU memory",
   "显示密码": "Show password",
+  "显示更早的消息": "Show earlier messages",
   "显示隐藏文件": "Show hidden files",
   "暂不可用": "Unavailable",
   "暂无主机": "No hosts yet",

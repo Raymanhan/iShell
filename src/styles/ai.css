@@ -457,6 +457,30 @@
   font-size: 11px;
   line-height: 1.6;
 }
+/* Older blocks of a long conversation load from here, page by page. */
+.ai-earlier {
+  display: flex;
+  justify-content: center;
+  margin: 4px 0 14px;
+}
+.ai-earlier button {
+  padding: 4px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+.ai-earlier button:hover {
+  color: var(--text);
+  border-color: rgba(var(--accent-rgb), 0.45);
+}
+.ai-earlier button:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.6);
+  outline-offset: 2px;
+}
 .ai-working {
   display: flex;
   align-items: center;

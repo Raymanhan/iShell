@@ -285,6 +285,47 @@ export function applyAiEvent(
   return entries;
 }
 
+/** Streamed text waits this long so a burst of tokens updates the panel once. */
+export const TEXT_BATCH_MS = 32;
+
+/** A text or thinking delta waiting to be applied to its reply. */
+export interface QueuedText {
+  event: AiEvent;
+  assistantId: string;
+}
+
+/**
+ * Adds a streamed delta to the queue, joining it to the previous one when it
+ * continues the same field of the same reply, so order is kept exactly.
+ */
+export function queueText(
+  queue: QueuedText[],
+  event: AiEvent,
+  assistantId: string,
+): QueuedText[] {
+  const last = queue[queue.length - 1];
+  if (last && last.assistantId === assistantId && last.event.type === event.type)
+    return [
+      ...queue.slice(0, -1),
+      {
+        assistantId,
+        event: { ...last.event, text: (last.event.text || "") + (event.text || "") },
+      },
+    ];
+  return [...queue, { event, assistantId }];
+}
+
+/** Applies queued deltas in order, as if each had arrived on its own. */
+export function applyQueuedText(
+  entries: AiEntry[],
+  queue: QueuedText[],
+): AiEntry[] {
+  return queue.reduce(
+    (current, item) => applyAiEvent(current, item.event, item.assistantId),
+    entries,
+  );
+}
+
 export function createConversation(
   config: AiConfig,
   serverId: string,

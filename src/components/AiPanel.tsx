@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -43,6 +44,12 @@ import {
 } from "../features/ai/types";
 import { useImeGuard } from "../features/ai/ime";
 import { useSmoothText } from "../features/ai/useSmoothText";
+import {
+  clampHidden,
+  initialHidden,
+  showEarlier,
+  trimWhileFollowing,
+} from "../features/ai/messageWindow";
 import {
   localSlashCommand,
   matchSlashCommands,
@@ -100,30 +107,27 @@ function ToolCard({
   target: string;
   onApprove: (allow: boolean) => void;
 }) {
-  const result = entry.result;
   const status = toolStatus(entry);
   // Slide in only cards that appear while the task runs, not restored ones.
   const [live] = useState(() =>
     Boolean(entry.running || entry.approvalPending),
   );
+  // Collapsed while it runs; the user opens it when they want the details.
+  // Only an approval opens it, since it needs a decision, and closes it again
+  // once decided. The risk assessment decides whether to ask but is not shown.
+  const pending = Boolean(entry.approvalPending);
+  const [openedByUser, setOpenedByUser] = useState(false);
+  const open = pending || openedByUser;
   const failed = status.kind === "error";
-  const args = entry.arguments;
   const { title, literal } = toolTitle(entry);
-  const code = String(
-    args?.command ??
-      args?.code ??
-      args?.content ??
-      args?.path ??
-      entry.rawArguments ??
-      "",
-  );
   return (
     <details
       className={`ai-tool ${failed ? "failed" : ""} ${status.kind === "neutral" ? "neutral" : ""} ${entry.approvalPending ? "awaiting" : ""} ${live ? "ai-enter" : ""}`}
-      // Collapsed while it runs; the user opens it when they want the
-      // details. Only an approval opens it, since it needs a decision. The
-      // risk assessment decides whether to ask but is not shown.
-      open={entry.approvalPending || undefined}
+      open={open}
+      // Toggles while an approval holds the card open are not the user's.
+      onToggle={(event) => {
+        if (!pending) setOpenedByUser(event.currentTarget.open);
+      }}
     >
       <summary>
         {entry.approvalPending ? (
@@ -143,6 +147,36 @@ function ToolCard({
         <span>{status.label}</span>
         <ChevronDown size={13} />
       </summary>
+      {/* A long task holds hundreds of cards, each with up to 32k characters
+          of output; closed ones render nothing until they are opened. */}
+      {open && (
+        <ToolCardBody entry={entry} target={target} onApprove={onApprove} />
+      )}
+    </details>
+  );
+}
+
+function ToolCardBody({
+  entry,
+  target,
+  onApprove,
+}: {
+  entry: AiEntry;
+  target: string;
+  onApprove: (allow: boolean) => void;
+}) {
+  const result = entry.result;
+  const args = entry.arguments;
+  const code = String(
+    args?.command ??
+      args?.code ??
+      args?.content ??
+      args?.path ??
+      entry.rawArguments ??
+      "",
+  );
+  return (
+    <>
       {(entry.name === "shell" || entry.name === "run_code") && (
         <div className="ai-tool-path">
           {t("目录：")}
@@ -206,7 +240,7 @@ function ToolCard({
         </small>
       )}
       {result?.truncated && <small>{t("输出较长，仅保留部分内容。")}</small>}
-    </details>
+    </>
   );
 }
 /** Why a user message cannot be edited right now, or "" when it can. */
@@ -486,6 +520,69 @@ export function AiPanel({
     () => editableUserEntries(conversation),
     [conversation.entries, conversation.messages],
   );
+  const blocks = useMemo(
+    () => groupTools(conversation.entries),
+    [conversation.entries],
+  );
+  // Only the latest blocks are rendered; scrolling up loads older pages.
+  // Opening another conversation starts again from its latest page.
+  const viewKey = `${tab.id}:${conversation.id}`;
+  const [view, setView] = useState(() => ({
+    key: viewKey,
+    hidden: initialHidden(blocks.length),
+  }));
+  let hidden = view.hidden;
+  if (view.key !== viewKey) {
+    hidden = initialHidden(blocks.length);
+    setView({ key: viewKey, hidden });
+  }
+  hidden = clampHidden(hidden, blocks.length);
+  const earlier = useRef<HTMLDivElement>(null);
+  // Distance from the bottom to keep while older blocks are added above.
+  const keepFromBottom = useRef<number | null>(null);
+  const loadEarlier = () => {
+    const element = scroller.current;
+    if (element) keepFromBottom.current = element.scrollHeight - element.scrollTop;
+    setView({ key: viewKey, hidden: showEarlier(hidden) });
+  };
+  const loadEarlierRef = useRef(loadEarlier);
+  loadEarlierRef.current = loadEarlier;
+  useLayoutEffect(() => {
+    const element = scroller.current;
+    if (!element || keepFromBottom.current === null) return;
+    element.scrollTop = element.scrollHeight - keepFromBottom.current;
+    keepFromBottom.current = null;
+  }, [hidden]);
+  // Reaching the top loads the next older page by itself.
+  useEffect(() => {
+    const target = earlier.current;
+    const root = scroller.current;
+    if (!target || !root || typeof IntersectionObserver === "undefined")
+      return;
+    const observer = new IntersectionObserver(
+      (items) => {
+        if (!follow.current && items.some((item) => item.isIntersecting))
+          loadEarlierRef.current();
+      },
+      { root, rootMargin: "240px 0px 0px 0px" },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hidden, viewKey]);
+  // Following a long task's output, fold back to the latest page so the
+  // panel does not keep every block it has shown.
+  useEffect(() => {
+    if (!follow.current) return;
+    const next = trimWhileFollowing(hidden, blocks.length);
+    if (next === hidden) return;
+    const editingAt = editingId
+      ? blocks.findIndex(
+          (block) => !Array.isArray(block) && block.id === editingId,
+        )
+      : -1;
+    if (editingAt >= 0 && editingAt < next) return;
+    setView({ key: viewKey, hidden: next });
+  }, [blocks, hidden, viewKey, editingId]);
   const editBlock = !connected
     ? t("请先连接服务器")
     : busy || serverBusy
@@ -884,7 +981,14 @@ export function AiPanel({
               {t("先配置模型地址、密钥和模型")}
             </button>
           )}
-          {groupTools(conversation.entries).map((block) => {
+          {hidden > 0 && (
+            <div className="ai-earlier" ref={earlier}>
+              <button type="button" onClick={loadEarlier}>
+                {t("显示更早的消息")}
+              </button>
+            </div>
+          )}
+          {blocks.slice(hidden).map((block) => {
             const message = (entry: AiEntry) => (
               <Message
                 key={entry.id}
