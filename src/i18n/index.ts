@@ -203,18 +203,30 @@ export function translateMessage(
   return text;
 }
 
-/** Locale-aware date/time formatting for the current language. */
+const BEIJING_TIME_ZONE = "Asia/Shanghai";
+
+const beijingCalendar = new Intl.DateTimeFormat("en-CA", {
+  timeZone: BEIJING_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+export function formatBeijingCalendarDate(value: number | Date): string {
+  const parts = Object.fromEntries(beijingCalendar.formatToParts(value).map(({ type, value }) => [type, value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+/** Format dates in the current language and Beijing time. */
 export function formatDateTime(
   value: number | Date,
   options?: Intl.DateTimeFormatOptions,
 ): string {
-  return new Intl.DateTimeFormat(current, options).format(value);
+  return new Intl.DateTimeFormat(current, { ...options, timeZone: BEIJING_TIME_ZONE }).format(value);
 }
 
 export function formatDate(value: number | Date): string {
-  return new Intl.DateTimeFormat(current, { dateStyle: "medium" }).format(
-    value,
-  );
+  return formatDateTime(value, { dateStyle: "medium" });
 }
 
 /**

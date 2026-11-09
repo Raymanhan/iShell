@@ -26,6 +26,7 @@ use crate::{
         TerminalClosedPayload, TerminalDataPayload, TerminalReadyPayload, TerminalSnapshotPayload,
     },
     store::{get_server, mark_connected, read_secret},
+    telemetry::{self, EventKind},
 };
 
 #[derive(Default)]
@@ -167,10 +168,17 @@ pub fn open_terminal(
             thread_app.clone(),
             thread_registry.clone(),
             thread_session_id.clone(),
-            id,
+            id.clone(),
             receiver,
         );
         if let Err(reason) = result {
+            if thread_registry
+                .ready_sessions
+                .lock()
+                .is_ok_and(|sessions| !sessions.contains(&thread_session_id))
+            {
+                telemetry::record(&thread_app, EventKind::SshLogin, Some(&id), false);
+            }
             let _ = thread_app.emit(
                 "terminal:closed",
                 TerminalClosedPayload {
@@ -349,7 +357,13 @@ fn emit_terminal_data(
     );
 }
 
-fn emit_terminal_ready(app: &AppHandle, registry: &TerminalRegistry, session_id: &str) {
+fn emit_terminal_ready(
+    app: &AppHandle,
+    registry: &TerminalRegistry,
+    session_id: &str,
+    server_id: &str,
+) {
+    telemetry::record(app, EventKind::SshLogin, Some(server_id), true);
     if let Ok(mut ready_sessions) = registry.ready_sessions.lock() {
         ready_sessions.insert(session_id.to_string());
     }
@@ -563,11 +577,21 @@ fn run_terminal_thread(
                         if connection_tail.contains(CONNECTED_MARKER) {
                             connected_seen = true;
                             mark_connected(&read_app, &read_server_id).ok();
-                            emit_terminal_ready(&read_app, &read_registry, &read_session_id);
+                            emit_terminal_ready(
+                                &read_app,
+                                &read_registry,
+                                &read_session_id,
+                                &read_server_id,
+                            );
                         } else if looks_like_shell_ready(&connection_tail) {
                             connected_seen = true;
                             mark_connected(&read_app, &read_server_id).ok();
-                            emit_terminal_ready(&read_app, &read_registry, &read_session_id);
+                            emit_terminal_ready(
+                                &read_app,
+                                &read_registry,
+                                &read_session_id,
+                                &read_server_id,
+                            );
                             emit_terminal_data(
                                 &read_app,
                                 &read_registry,
@@ -693,7 +717,12 @@ fn run_terminal_thread(
     let ready_session_id = session_id.clone();
     let on_ready = move || {
         mark_connected(&ready_app, &ready_server_id).ok();
-        emit_terminal_ready(&ready_app, &ready_registry, &ready_session_id);
+        emit_terminal_ready(
+            &ready_app,
+            &ready_registry,
+            &ready_session_id,
+            &ready_server_id,
+        );
         emit_terminal_data(
             &ready_app,
             &ready_registry,
