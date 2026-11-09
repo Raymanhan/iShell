@@ -160,7 +160,7 @@ export default function App() {
   const [autoCheckUpdates, setAutoCheckUpdates] = useState(readAutoCheckUpdates);
   const updater = useUpdater(autoCheckUpdates);
   const [autoHideTopBar, setAutoHideTopBar] = useState(
-    () => window.localStorage.getItem(AUTO_HIDE_TOP_BAR_KEY) !== "false",
+    () => window.localStorage.getItem(AUTO_HIDE_TOP_BAR_KEY) === "true",
   );
   const [tabs, setTabs] = useState<ShellTab[]>(() => handedOffInitialTab ? [handedOffInitialTab] : []);
   const ai = useAi(tabs);

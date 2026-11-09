@@ -45,7 +45,7 @@ export interface AppThemeDefinition {
   native: NativeTheme;
 }
 
-export const defaultAppTheme: AppTheme = "glass";
+export const defaultAppTheme: AppTheme = "liquid-glass-clay";
 
 export const appThemeOrder = [
   "liquid-glass-cloud",
