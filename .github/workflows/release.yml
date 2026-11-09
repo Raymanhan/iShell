@@ -1,4 +1,4 @@
-name: Recover v1.5.16 Linux installer
+name: Recover v1.5.16 Windows installer
 
 on:
   workflow_dispatch:
@@ -7,10 +7,10 @@ permissions:
   contents: read
 
 jobs:
-  linux:
-    name: Package the v1.5.16 Linux installer
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
+  windows:
+    name: Package the v1.5.16 Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 25
     env:
       ISHELL_MANAGEMENT_URL: ${{ vars.ISHELL_MANAGEMENT_URL }}
     steps:
@@ -24,57 +24,92 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev
-      - name: Fetch and verify the official AppImage tools through the GitHub API
+          targets: x86_64-pc-windows-msvc
+      - name: Fetch and verify the official WiX and NSIS tools
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          set -euo pipefail
-          tools_dir="$HOME/.cache/tauri"
-          mkdir -p "$tools_dir"
-          fetch_asset() {
-            local repo="$1" asset="$2" sha="$3" filename="$4" attempt
-            for attempt in 1 2 3; do
-              if timeout 75 gh api -H 'Accept: application/octet-stream' "repos/$repo/releases/assets/$asset" > "$tools_dir/$filename.part" &&
-                printf '%s  %s\n' "$sha" "$tools_dir/$filename.part" | sha256sum --check; then
-                install -m 0755 "$tools_dir/$filename.part" "$tools_dir/$filename"
-                rm "$tools_dir/$filename.part"
-                return
-              fi
-              sleep "$((attempt * 3))"
-            done
-            return 1
-          }
-          fetch_asset tauri-apps/binary-releases 274691722 f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f AppRun-x86_64
-          fetch_asset tauri-apps/binary-releases 576945544 36a2d7e274d12e1050d0e9ecfe11d339ed54720b2bec464c286d53f8b07f5c62 linuxdeploy-07333c6-x86_64.AppImage
-          fetch_asset linuxdeploy/linuxdeploy-plugin-appimage 602435573 49d6a17160675a6bd1781699aae6bdf7692d98552e02a3671d2183d10547842e linuxdeploy-plugin-appimage.AppImage
+          python - <<'PYTOOLS'
+          import hashlib
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          import time
+          from zipfile import ZipFile
+
+          def fetch(repo, asset, path, sha256=None, sha1=None):
+              for attempt in range(3):
+                  try:
+                      with path.open("wb") as stream:
+                          subprocess.run(
+                              ["gh", "api", "-H", "Accept: application/octet-stream",
+                               f"repos/{repo}/releases/assets/{asset}"],
+                              stdout=stream, check=True, timeout=90,
+                          )
+                      break
+                  except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                      if attempt == 2:
+                          raise
+                      time.sleep((attempt + 1) * 3)
+              data = path.read_bytes()
+              if sha256 is not None and hashlib.sha256(data).hexdigest() != sha256:
+                  raise RuntimeError(f"SHA-256 mismatch for {path.name}")
+              if sha1 is not None and hashlib.sha1(data).hexdigest() != sha1:
+                  raise RuntimeError(f"SHA-1 mismatch for {path.name}")
+              print(f"Verified {path.name}", flush=True)
+
+          cache = Path(os.environ["LOCALAPPDATA"]) / "tauri"
+          cache.mkdir(parents=True, exist_ok=True)
+          with tempfile.TemporaryDirectory() as tmp:
+              temp = Path(tmp)
+              wix = temp / "wix314-binaries.zip"
+              nsis = temp / "nsis-3.13.zip"
+              plugin = temp / "nsis_tauri_utils.dll"
+              fetch("wixtoolset/wix3", 158158052, wix,
+                    sha256="6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31")
+              fetch("tauri-apps/binary-releases", 623832696, nsis,
+                    sha256="ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8",
+                    sha1="db14f8af2ea346b786c6ae19343f61aaf5e09b8e")
+              fetch("tauri-apps/nsis-tauri-utils", 345882097, plugin,
+                    sha256="5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709",
+                    sha1="75197fee3c6a814fe035788d1c34ead39349b860")
+              wix_cache = cache / "WixTools314"
+              nsis_cache = cache / "NSIS"
+              with ZipFile(wix) as archive:
+                  archive.extractall(wix_cache)
+              with ZipFile(nsis) as archive:
+                  archive.extractall(cache)
+              (cache / "nsis-3.13").rename(nsis_cache)
+              destination = nsis_cache / "Plugins/x86-unicode/additional/nsis_tauri_utils.dll"
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              destination.write_bytes(plugin.read_bytes())
+              assert (wix_cache / "candle.exe").is_file()
+              assert hashlib.sha1((nsis_cache / "NSIS.exe").read_bytes()).hexdigest() == "6d45d4e8ccf18fe1fdac9164058f356102a2ecf2"
+          PYTOOLS
       - run: npm ci
       - name: Package and sign
+        shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           test "$(git rev-parse HEAD)" = a9fbcc59fac1c59a9b2da015079f28e1393a3b8e
           test "$ISHELL_MANAGEMENT_URL" = https://81.70.52.10
-          npm run tauri -- build --target x86_64-unknown-linux-gnu
+          npm run tauri -- build --target x86_64-pc-windows-msvc
       - uses: actions/upload-artifact@v4
         with:
-          name: ishell-linux-x64
+          name: ishell-windows-x64
           path: |
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/**/*.AppImage
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/**/*.deb
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/**/*.rpm
-            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/**/*.sig
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.msi
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.sig
           if-no-files-found: error
 
   publish:
     name: Verify installers and publish v1.5.16
-    needs: linux
+    needs: windows
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -85,19 +120,21 @@ jobs:
         with:
           ref: refs/tags/v1.5.16
           persist-credentials: false
-      - name: Verify the other three platforms succeeded on the same tag
+      - name: Verify the Linux and macOS artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          expected=a9fbcc59fac1c59a9b2da015079f28e1393a3b8e
-          for attempt in {1..30}; do
-            release_run=$(gh run view 42569637138 --json headSha,status,jobs)
-            jq -e --arg sha "$expected" '.headSha == $sha' <<< "$release_run" >/dev/null
-            if jq -e '.status == "completed"' <<< "$release_run" >/dev/null; then
-              jq -e '([.jobs[] | select(.name == "Build Windows x64" or .name == "Build macOS Intel" or .name == "Build macOS Arm")] | length == 3 and all(.conclusion == "success"))' <<< "$release_run" >/dev/null
+          original=$(gh run view 42569637138 --json headSha,status,jobs)
+          jq -e '.headSha == "a9fbcc59fac1c59a9b2da015079f28e1393a3b8e" and ([.jobs[] | select(.name == "Build macOS Intel" or .name == "Build macOS Arm")] | length == 2 and all(.conclusion == "success"))' <<< "$original" >/dev/null
+          for attempt in {1..36}; do
+            linux=$(gh run view 42571161323 --json jobs)
+            if jq -e 'any(.jobs[]; .name == "Package the v1.5.16 Linux installer" and .conclusion == "success")' <<< "$linux" >/dev/null; then
               exit 0
+            fi
+            if jq -e 'any(.jobs[]; .name == "Package the v1.5.16 Linux installer" and .status == "completed")' <<< "$linux" >/dev/null; then
+              exit 1
             fi
             sleep 10
           done
@@ -105,12 +142,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ishell-linux-x64
+          github-token: ${{ github.token }}
+          run-id: '42571161323'
           path: artifacts/linux
       - uses: actions/download-artifact@v4
         with:
           name: ishell-windows-x64
-          github-token: ${{ github.token }}
-          run-id: '42569637138'
           path: artifacts/windows
       - uses: actions/download-artifact@v4
         with:
