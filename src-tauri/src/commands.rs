@@ -489,11 +489,7 @@ pub fn list_command_history(app: AppHandle) -> Result<Vec<String>, String> {
 
 #[tauri::command]
 pub fn save_command_history(app: AppHandle, command_text: String) -> Result<(), String> {
-    append_command_history(&app, &command_text)?;
-    if !command_text.trim().is_empty() {
-        telemetry::record(&app, EventKind::CommandRecorded, None, true);
-    }
-    Ok(())
+    append_command_history(&app, &command_text)
 }
 
 #[tauri::command]

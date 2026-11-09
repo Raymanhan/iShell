@@ -20,7 +20,7 @@ import {
   type ConnectionDeleteConfirmState,
 } from "./tree";
 
-import { t } from "../../i18n";
+import { formatBeijingCalendarDate, t } from "../../i18n";
 const CONNECTION_FOLDERS_KEY = "ishell.connectionFolders";
 
 interface ConnectionImportPayload {
@@ -242,7 +242,7 @@ export function useConnections({
     const asZip = exportFolders.length > 0 || exportServers.length > 1;
     const picked = await save({
       title: t("导出连接"),
-      defaultPath: `ishell-connections-${new Date().toISOString().slice(0, 10)}.${asZip ? "zip" : "json"}`,
+      defaultPath: `ishell-connections-${formatBeijingCalendarDate(Date.now())}.${asZip ? "zip" : "json"}`,
       filters: [{ name: asZip ? t("ZIP 压缩包") : t("JSON 文件"), extensions: [asZip ? "zip" : "json"] }],
     });
     if (!picked) return;

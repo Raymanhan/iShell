@@ -224,6 +224,8 @@ The Chinese [project analysis and promotion notes](docs/PROJECT_ANALYSIS.zh-CN.m
 <details>
 <summary>Expand release history</summary>
 
+- `v1.5.17` keeps command history on the device and stops sending per-command events. Dates displayed in the app and dates in export filenames now use Beijing time (UTC+8).
+
 - `v1.5.16` adds anonymous installation and activity reporting for releases configured with an iShell Management server. SSH and SFTP remain available without an account.
 
 - `v1.5.15` makes "Claude dark" the default theme for new installs and turns off top bar auto-hide by default. Users who have already saved these settings keep them.

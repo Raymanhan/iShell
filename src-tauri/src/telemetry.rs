@@ -26,7 +26,6 @@ pub struct Telemetry(Option<SyncSender<PendingEvent>>);
 pub enum EventKind {
     SshLogin,
     SshTest,
-    CommandRecorded,
     ServerSaved,
     ServerDeleted,
     SftpUpload,
