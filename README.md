@@ -1,4 +1,6 @@
 # iShell
+<center><img width="1521" height="905" alt="image" src="https://github.com/user-attachments/assets/ff290b86-4b9e-47b4-8678-b98a5c4e4e27" />
+</center>
 
 **An all-in-one SSH workbench with a built-in AI server assistant.**
 
