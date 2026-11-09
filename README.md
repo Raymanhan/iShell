@@ -223,6 +223,8 @@ The Chinese [project analysis and promotion notes](docs/PROJECT_ANALYSIS.zh-CN.m
 <details>
 <summary>Expand release history</summary>
 
+- `v1.5.15` makes "Claude dark" the default theme for new installs and turns off top bar auto-hide by default. Users who have already saved these settings keep them.
+
 - `v1.5.14` makes the AI assistant's "Automatic, low risk" mode judge reads and writes, so it asks far less often. Commands are split at pipes, `;`, `&&` and substitutions and each part is judged: read-only operations such as viewing files and logs or querying status and listings (including pipelines and `2>/dev/null`) run automatically, while writing files, changing the server, installing software, starting or stopping services, running scripts or code, and commands that cannot be confirmed read-only still ask. Reading likely key or credential files, globbing in home or hidden directories, and endless commands such as `tail -f` ask first too; words like token or password in a command no longer trigger approval, and `/etc/passwd` is no longer treated as sensitive.
 
 - `v1.5.13` fixes the AI assistant's history list having a see-through background that let the chat behind it show through in some themes. The manual model or reasoning entry and the scroll-to-latest button are opaque too, with a dark surface in dark themes and a light one in light themes.
