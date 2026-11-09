@@ -2512,7 +2512,7 @@ dependencies = [
 
 [[package]]
 name = "ishell"
-version = "1.5.15"
+version = "1.5.16"
 dependencies = [
  "aes-gcm 0.10.3",
  "base64 0.22.1",
@@ -3964,6 +3964,7 @@ checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",

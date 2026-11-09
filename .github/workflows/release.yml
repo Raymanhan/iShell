@@ -12,6 +12,8 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.label }}
+    env:
+      ISHELL_MANAGEMENT_URL: ${{ vars.ISHELL_MANAGEMENT_URL }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
