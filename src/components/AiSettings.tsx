@@ -113,11 +113,31 @@ export function AiSettings({
   }
   return (
     <div className="ai-settings">
-      <div className="settings-section-copy">
-        <h3>{t("模型服务")}</h3>
-        <p>
-          {t("连接支持工具调用的 OpenAI 兼容 Chat Completions 服务。任务消息、必要的服务器信息和工具输出将发送到此地址。")}</p>
+      <div className="ai-settings-head">
+        <div className="settings-section-copy">
+          <h3>{t("模型服务")}</h3>
+          <p>
+            {t("连接支持工具调用的 OpenAI 兼容 Chat Completions 服务。任务消息、必要的服务器信息和工具输出将发送到此地址。")}</p>
+        </div>
+        <button
+          type="button"
+          className="btn-primary ai-save"
+          onClick={() => void save()}
+          disabled={Boolean(busy)}
+        >
+          {busy === "save" && <LoaderCircle size={14} className="ai-spin" />}
+          {t("保存 AI 设置")}</button>
       </div>
+      {error && (
+        <p className="ai-error" role="alert">
+          {error}
+        </p>
+      )}
+      {notice && (
+        <p className="ai-settings-notice" role="status">
+          {notice}
+        </p>
+      )}
       <fieldset disabled={Boolean(busy)}>
         <label>
           {t("API 地址")}<input
@@ -239,24 +259,7 @@ export function AiSettings({
           <p>
             {t("上下文上限由模型元数据声明的窗口决定，估算用量达到窗口的 75% 时自动生成历史摘要；元数据未声明窗口时按 200k tokens 处理。摘要保留原始任务和近期完整工具调用，聊天记录仍可查看。也可在对话中输入 /compact 随时手动压缩，后面可附上需要重点保留的内容。")}</p>
         </div>
-        <button
-          type="button"
-          className="btn-primary ai-save"
-          onClick={() => void save()}
-        >
-          {busy === "save" && <LoaderCircle size={14} className="ai-spin" />}
-          {t("保存 AI 设置")}</button>
       </fieldset>
-      {error && (
-        <p className="ai-error" role="alert">
-          {error}
-        </p>
-      )}
-      {notice && (
-        <p className="ai-settings-notice" role="status">
-          {notice}
-        </p>
-      )}
     </div>
   );
 }

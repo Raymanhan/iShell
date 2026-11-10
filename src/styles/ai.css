@@ -815,15 +815,29 @@
   font-size: 10.5px;
   cursor: pointer;
 }
+.ai-settings-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.ai-settings-head .settings-section-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .ai-settings .ai-save {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  justify-self: end;
   padding: 8px 15px;
   font: inherit;
   font-size: 12px;
+  white-space: nowrap;
+}
+.ai-settings .ai-error {
+  margin: 0;
 }
 .ai-settings-notice {
   color: var(--vivid-green);
