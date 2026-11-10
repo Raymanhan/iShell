@@ -224,6 +224,8 @@ The Chinese [project analysis and promotion notes](docs/PROJECT_ANALYSIS.zh-CN.m
 <details>
 <summary>Expand release history</summary>
 
+- `v1.6.1` shows connection-test failures in full. Instead of one truncated line next to the buttons, the server editor shows the likely cause (wrong credentials, timeout, connection refused, unknown host, changed host key, unreadable private key, unreachable network, or connection closed by the server), what to check, and the complete SSH output, which wraps and can be copied. Terminal tabs no longer slide under the toolbar when many are open: the tab strip leaves room for the buttons on both sides, tabs keep a readable width, and the strip scrolls sideways with the active tab kept in view. The "Save AI settings" button moves to the top of the AI settings page, next to the section title, with its messages shown right below it.
+
 - `v1.6.0` keeps long AI assistant conversations fast. A conversation opens on its latest messages, and scrolling to the top or choosing "Show earlier messages" loads older ones page by page without moving the view; while following a long task, older messages are folded away again. Collapsed tool cards no longer render their command and output until opened, and cards that need approval still open by themselves. Streamed replies are applied in batches, so the panel stays smooth while text arrives. In a conversation with about a thousand entries it opens about four times faster with about 95% fewer page elements.
 
 - `v1.5.17` keeps command history on the device and stops sending per-command events. Dates displayed in the app and dates in export filenames now use Beijing time (UTC+8).
