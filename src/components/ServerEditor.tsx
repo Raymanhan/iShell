@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Eye, EyeOff, PlugZap, X } from "lucide-react";
+import { AlertCircle, Check, Copy, Eye, EyeOff, PlugZap, X } from "lucide-react";
+import { describeConnectionError } from "../features/connections/connectionError";
 import { swatches } from "../constants/theme";
 import type { ServerInput, ServerRecord } from "../types";
 
@@ -162,6 +163,8 @@ export function ServerEditor({
           </div>
         </div>
 
+        {testFeedback?.kind === "error" && <ConnectionTestError message={testFeedback.message} />}
+
         <div className="editor-actions">
           {onDelete && (
             <button className="danger-button" type="button" onClick={onDelete}>
@@ -171,7 +174,7 @@ export function ServerEditor({
             className={`connection-test-feedback ${testFeedback ? testFeedback.kind : ""}`}
             aria-live="polite"
           >
-            {testFeedback?.message}
+            {testFeedback?.kind === "error" ? null : testFeedback?.message}
           </span>
           <button className="btn-ghost" type="button" onClick={onClose}>
             {t("取消")}</button>
@@ -184,6 +187,36 @@ export function ServerEditor({
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+/** Full connection-test error: a readable reason, what to check, and the raw output. */
+function ConnectionTestError({ message }: { message: string }) {
+  const info = describeConnectionError(message);
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    void navigator.clipboard
+      ?.writeText(info.detail)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1400);
+      })
+      .catch(() => undefined);
+  };
+  return (
+    <div className="connection-test-error" role="alert">
+      <AlertCircle size={15} aria-hidden="true" />
+      <div className="connection-test-error-body">
+        <strong>{t(info.reason)}</strong>
+        {info.hint && <p>{t(info.hint)}</p>}
+        {info.detail && <pre>{info.detail}</pre>}
+      </div>
+      {info.detail && (
+        <button type="button" className="icon-button" onClick={copy} title={t("复制错误信息")} aria-label={t("复制错误信息")}>
+          {copied ? <Check size={13} /> : <Copy size={13} />}
+        </button>
+      )}
     </div>
   );
 }
