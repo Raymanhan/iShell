@@ -12,6 +12,11 @@ import { MAX_PANES, splitShortcutLabel, type SplitDirection } from "../features/
 import type { ShellTab, SidePanel } from "../features/shell/types";
 
 import { t } from "../i18n";
+/** Space between the tab strip and the controls beside it. */
+const TOPBAR_GAP = 10;
+/** Width of the drag area kept after the last tab. */
+const TAB_SPACER = 18;
+
 interface TabDropPoint {
   screenX: number;
   screenY: number;
@@ -84,6 +89,10 @@ export function TabBar({
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef(new Map<string, HTMLDivElement>());
+  const barRef = useRef<HTMLElement>(null);
+  const leftRef = useRef<HTMLDivElement>(null);
+  const rightRef = useRef<HTMLDivElement>(null);
+  const stripRef = useRef<HTMLDivElement>(null);
   const tabRectsBeforeReorder = useRef(new Map<string, DOMRect>());
   const tabDragRef = useRef<{
     tabId: string;
@@ -140,6 +149,61 @@ export function TabBar({
 
     previousRects.clear();
   }, [tabs, draggingTabId]);
+
+  // Keep the tab strip clear of the controls on both sides: their width
+  // changes with the platform, the connection drawer and the active tab.
+  useLayoutEffect(() => {
+    const bar = barRef.current;
+    const left = leftRef.current;
+    const right = rightRef.current;
+    if (!bar || !left || !right) return;
+    const measure = () => {
+      const barRect = bar.getBoundingClientRect();
+      const leftEdge = Math.ceil(left.getBoundingClientRect().right - barRect.left + TOPBAR_GAP);
+      const rightEdge = Math.ceil(barRect.right - right.getBoundingClientRect().left + TOPBAR_GAP);
+      bar.style.setProperty("--topbar-left-reserve", `${leftEdge}px`);
+      bar.style.setProperty("--topbar-right-reserve", `${rightEdge}px`);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(bar);
+    observer.observe(left);
+    observer.observe(right);
+    return () => observer.disconnect();
+  }, []);
+
+  // Too many tabs to fit: the strip scrolls sideways, fades at the clipped
+  // edge, and keeps the active tab in view.
+  useLayoutEffect(() => {
+    const strip = stripRef.current;
+    if (!strip) return;
+    const update = () => {
+      const max = strip.scrollWidth - strip.clientWidth;
+      strip.classList.toggle("fade-left", strip.scrollLeft > 1);
+      strip.classList.toggle("fade-right", strip.scrollLeft < max - 1);
+    };
+    update();
+    strip.addEventListener("scroll", update, { passive: true });
+    const observer = new ResizeObserver(update);
+    observer.observe(strip);
+    return () => {
+      strip.removeEventListener("scroll", update);
+      observer.disconnect();
+    };
+  }, [tabs.length > 0]);
+
+  useLayoutEffect(() => {
+    const strip = stripRef.current;
+    const node = activeTabId ? tabRefs.current.get(activeTabId) : undefined;
+    if (!strip || !node) return;
+    const stripRect = strip.getBoundingClientRect();
+    const rect = node.getBoundingClientRect();
+    if (rect.left < stripRect.left) {
+      strip.scrollLeft -= stripRect.left - rect.left + TOPBAR_GAP;
+    } else if (rect.right > stripRect.right - TAB_SPACER) {
+      strip.scrollLeft += rect.right - (stripRect.right - TAB_SPACER) + TOPBAR_GAP;
+    }
+  }, [activeTabId, tabs.length]);
 
   useEffect(() => {
     if (!menu) return;
@@ -428,13 +492,14 @@ export function TabBar({
 
   return (
     <header
+      ref={barRef}
       className={`workbench-bar ${autoHide ? "auto-hide" : ""} ${connectionsOpen ? "connections-open" : ""} ${tabs.length > 0 ? "has-tabs" : ""} ${
         draggingTabId ? "tab-dragging" : ""
       }`}
     >
       <div className="topbar-drag-strip" data-tauri-drag-region aria-hidden />
 
-      <div className="topbar-left">
+      <div className="topbar-left" ref={leftRef}>
         <button
           type="button"
           className={`connection-trigger ${connectionsOpen ? "on" : ""}`}
@@ -464,7 +529,16 @@ export function TabBar({
         {...(tabs.length === 0 ? { "data-tauri-drag-region": true } : {})}
       >
         {tabs.length > 0 ? (
-          <div className={`terminal-tabs ${draggingTabId ? "is-sorting" : ""}`} role="tablist" aria-label={t("已连接服务器")}>
+          <div
+            ref={stripRef}
+            className={`terminal-tabs ${draggingTabId ? "is-sorting" : ""}`}
+            role="tablist"
+            aria-label={t("已连接服务器")}
+            onWheel={(event) => {
+              // A mouse wheel scrolls the strip sideways; trackpads already do.
+              if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) event.currentTarget.scrollLeft += event.deltaY;
+            }}
+          >
             {tabs.map((tab) => (
               <div
                 key={tab.id}
@@ -527,7 +601,7 @@ export function TabBar({
         )}
       </div>
 
-      <div className="bar-right">
+      <div className="bar-right" ref={rightRef}>
         <div className="dock-switcher" role="group" aria-label={t("工具")}>
           {activeTabId && (
             <>
