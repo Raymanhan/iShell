@@ -8,6 +8,13 @@ import { command, isTauri } from "../api/tauri";
 import { getTerminalSurfaceReport, getTerminalTheme, type AppTheme } from "../constants/theme";
 import { splitShortcutDirection, type PaneRect, type SplitDirection } from "../features/shell/panes";
 import { directoryLinkProvider } from "../features/shell/directoryLinks";
+import {
+  cleanSuggestedCommand,
+  isAskAiShortcut,
+  isGenerateCommandShortcut,
+  naturalLanguageRequest,
+  requestFromPromptLine,
+} from "../features/shell/aiAssist";
 import { enableUnicode11, enableWebglRenderer } from "../features/shell/renderer";
 import type { ShellTab } from "../features/shell/types";
 import { isTerminalSearchShortcut, TerminalSearchBar } from "./TerminalSearchBar";
@@ -22,6 +29,7 @@ import {
 const passwordPromptPattern = /(?:password|passphrase|密码|口令)[^:\n\r]*[:：]\s*$/i;
 const platformSource = `${navigator.userAgent} ${navigator.platform}`.toLowerCase();
 const isWindowsPlatform = platformSource.includes("win");
+const isMacPlatform = platformSource.includes("mac");
 const terminalFontFamily = platformSource.includes("win")
   ? '"Cascadia Mono", "Cascadia Code", Consolas, "Microsoft YaHei Mono", "Microsoft YaHei", monospace'
   : '"SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace';
@@ -64,6 +72,8 @@ function TerminalPaneBase({
   onReconnect,
   onCommandSubmitted,
   onOpenDirectory,
+  onAskAi,
+  onSuggestCommand,
   pasteRequest,
   commandRequest,
   commandHistory,
@@ -88,6 +98,10 @@ function TerminalPaneBase({
   onReconnect?: () => void;
   onCommandSubmitted?: (command: string) => void;
   onOpenDirectory?: (path: string) => void;
+  /** ⌘⇧A / Ctrl+Shift+A with output selected: ask the AI about it. */
+  onAskAi?: (selection: string) => void;
+  /** ⌘↩ / Ctrl+Enter on a `# …` line: a command for the description. */
+  onSuggestCommand?: (request: string) => Promise<string>;
   pasteRequest?: { id: number; command: string } | null;
   commandRequest?: { id: number; command: string; requirePromptStart?: boolean; blockedNotice?: string } | null;
   commandHistory: readonly string[];
@@ -118,6 +132,11 @@ function TerminalPaneBase({
   const onClosedRef = useRef(onClosed);
   const onCommandSubmittedRef = useRef(onCommandSubmitted);
   const onOpenDirectoryRef = useRef(onOpenDirectory);
+  const onAskAiRef = useRef(onAskAi);
+  onAskAiRef.current = onAskAi;
+  const onSuggestCommandRef = useRef(onSuggestCommand);
+  onSuggestCommandRef.current = onSuggestCommand;
+  const suggestingRef = useRef(false);
   onOpenDirectoryRef.current = onOpenDirectory;
   const onSplitRef = useRef(onSplit);
   onSplitRef.current = onSplit;
@@ -373,6 +392,38 @@ function TerminalPaneBase({
     return true;
   }
 
+  /** The `# …` description on the cursor's line, if that is what it holds. */
+  function currentAiRequest(): string | null {
+    const buffer = terminalRef.current?.buffer.active;
+    const line = buffer?.getLine(buffer.baseY + buffer.cursorY)?.translateToString(true) ?? "";
+    return requestFromPromptLine(line) ?? naturalLanguageRequest(commandDraftRef.current);
+  }
+
+  /** Replace the `# …` line with a command for it, without running it. */
+  async function suggestCommand(request: string) {
+    const suggest = onSuggestCommandRef.current;
+    const sessionId = sessionRef.current;
+    if (!suggest) return;
+    suggestingRef.current = true;
+    setNotice("AI 正在生成命令…");
+    try {
+      const commandText = cleanSuggestedCommand(await suggest(request));
+      // The user may have switched sessions or typed on meanwhile.
+      if (sessionRef.current !== sessionId || currentAiRequest() !== request) return;
+      if (!commandText) {
+        setNotice("AI 没有给出命令");
+        return;
+      }
+      // Ctrl+U clears the line; the command is typed but not submitted.
+      rawSendTerminalInput(`\x15${commandText}`, false);
+      setNotice(commandText.startsWith("#") ? "AI 未给出可执行命令，说明已放在命令行" : "命令已填入，确认后按回车执行");
+    } catch (error) {
+      setNotice(`生成命令失败：${String(error)}`);
+    } finally {
+      suggestingRef.current = false;
+    }
+  }
+
   function sendTerminalInput(data: string) {
     if (handleHistorySuggestInput(data)) return;
     rawSendTerminalInput(data);
@@ -473,6 +524,24 @@ function TerminalPaneBase({
         onSplitRef.current(splitDirection);
         event.preventDefault();
         return false;
+      }
+
+      if (isAskAiShortcut(event, isMacPlatform) && onAskAiRef.current) {
+        const selection = terminal.getSelection();
+        if (selection.trim()) {
+          onAskAiRef.current(selection);
+          event.preventDefault();
+          return false;
+        }
+      }
+
+      if (isGenerateCommandShortcut(event, isMacPlatform) && onSuggestCommandRef.current) {
+        const request = currentAiRequest();
+        if (request) {
+          event.preventDefault();
+          if (!suggestingRef.current) void suggestCommand(request);
+          return false;
+        }
       }
 
       if (isTerminalSearchShortcut(event)) {

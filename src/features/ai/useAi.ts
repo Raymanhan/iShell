@@ -567,6 +567,23 @@ export function useAi(tabs: ShellTab[]) {
     },
     deleteHistory,
     newChat,
+    /** One shell command for a description, using the tab's current model. */
+    suggestCommand: async (tab: ShellTab, request: string): Promise<string> => {
+      if (!isTauri) return `echo "演示模式：${request.replace(/["\\$`]/g, "")}"`;
+      if (!tab.sessionId) throw new Error("终端尚未连接");
+      const conversation = current.current[active.current[tab.id]];
+      const model = conversation?.model || configRef.current.defaultModel;
+      if (!model) throw new Error("请先在 AI 助手设置中选择模型");
+      return command("ai_suggest_command", {
+        input: {
+          serverId: tab.serverId,
+          sessionId: tab.sessionId,
+          model,
+          effort: conversation?.effort || "default",
+          request,
+        },
+      });
+    },
     update: (
       tabId: string,
       change: (value: AiConversation) => AiConversation,

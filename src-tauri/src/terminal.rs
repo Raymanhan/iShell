@@ -146,12 +146,18 @@ impl TerminalRegistry {
     }
 
     /// The last `max_bytes` of a session's output.
-    #[allow(dead_code)]
     pub(crate) fn recent_output(&self, session_id: &str, max_bytes: usize) -> Option<Vec<u8>> {
         self.with_session(session_id, |session| {
             let skip = session.buffer.len().saturating_sub(max_bytes);
             session.buffer[skip..].to_vec()
         })
+    }
+
+    /// The last `lines` lines of a session's output as plain text, for the
+    /// AI: escape sequences removed, overwritten line content resolved.
+    pub(crate) fn recent_text(&self, session_id: &str, lines: usize) -> Option<String> {
+        let bytes = self.recent_output(session_id, 256 * 1024)?;
+        Some(plain_lines(&String::from_utf8_lossy(&bytes), lines))
     }
 
     fn output(&self, session_id: &str, data: &[u8]) {
@@ -289,6 +295,111 @@ pub fn close_terminal(registry: &TerminalRegistry, session_id: &str) {
 
 #[cfg(not(russh_backend))]
 const CONNECTED_MARKER: &str = "[iShell] connected";
+
+/// Whether a character takes two terminal cells (CJK, Hangul, fullwidth
+/// forms, most emoji). Readline moves the cursor by cells, not characters.
+fn is_wide(ch: char) -> bool {
+    matches!(ch as u32,
+        0x1100..=0x115F | 0x2E80..=0x303E | 0x3041..=0x33FF | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF | 0xA000..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F | 0x1F900..=0x1FAFF | 0x20000..=0x3FFFD)
+}
+
+/// One line being drawn: cells hold a character, or `None` for the second
+/// half of a wide one.
+#[derive(Default)]
+struct LineDraw {
+    cells: Vec<Option<char>>,
+    cursor: usize,
+}
+
+impl LineDraw {
+    fn put(&mut self, ch: char) {
+        let width = if is_wide(ch) { 2 } else { 1 };
+        if self.cells.len() < self.cursor + width {
+            self.cells.resize(self.cursor + width, Some(' '));
+        }
+        self.cells[self.cursor] = Some(ch);
+        if width == 2 {
+            self.cells[self.cursor + 1] = None;
+        }
+        self.cursor += width;
+    }
+
+    fn text(&self) -> String {
+        self.cells
+            .iter()
+            .flatten()
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+}
+
+/// Terminal output as the lines a reader would see. Carriage returns,
+/// backspaces and erase-in-line (`ESC [ K`) are applied, as a shell's line
+/// editor and progress bars use them; other escape sequences are dropped.
+fn plain_lines(output: &str, lines: usize) -> String {
+    let mut done: Vec<String> = Vec::new();
+    let mut line = LineDraw::default();
+    let mut chars = output.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\n' => done.push(std::mem::take(&mut line).text()),
+            '\r' => line.cursor = 0,
+            '\x08' => line.cursor = line.cursor.saturating_sub(1),
+            '\t' => {
+                let next = (line.cursor / 8 + 1) * 8;
+                while line.cursor < next {
+                    line.put(' ');
+                }
+            }
+            '\x1b' => match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    let mut params = String::new();
+                    let mut last = '\0';
+                    for seq in chars.by_ref() {
+                        if ('@'..='~').contains(&seq) {
+                            last = seq;
+                            break;
+                        }
+                        params.push(seq);
+                    }
+                    if last == 'K' {
+                        match params.as_str() {
+                            "" | "0" => line.cells.truncate(line.cursor),
+                            "2" => line.cells.clear(),
+                            _ => {}
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(seq) = chars.next() {
+                        if seq == '\x07' {
+                            break;
+                        }
+                        if seq == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            ch if ch.is_control() => {}
+            ch => line.put(ch),
+        }
+    }
+    done.push(line.text());
+    while done.last().is_some_and(|line| line.trim().is_empty()) {
+        done.pop();
+    }
+    let skip = done.len().saturating_sub(lines);
+    done[skip..].join("\n")
+}
 
 #[cfg(not(russh_backend))]
 fn strip_ansi_sequences(value: &str) -> String {
@@ -716,6 +827,36 @@ mod tests {
         let (late, frames) = recording_channel();
         attach_terminal(&registry, &id, late).unwrap();
         assert_eq!(decode(&frames.lock().unwrap()[0]).1, start);
+    }
+
+    #[test]
+    fn recent_text_is_what_a_reader_sees() {
+        let (channel, _) = recording_channel();
+        let (registry, id) = registry_with_session(channel);
+        registry.output(&id, b"\x1b[1;32mok\x1b[0m line one\r\n");
+        registry.output(&id, b"progress 10%\rprogress 100%\r\n");
+        registry.output(
+            &id,
+            "\x1b]0;title\x07错误：端口被占用\r\n$ \r\n\r\n".as_bytes(),
+        );
+        assert_eq!(
+            registry.recent_text(&id, 10).unwrap(),
+            "ok line one\nprogress 100%\n错误：端口被占用\n$"
+        );
+        assert_eq!(registry.recent_text(&id, 2).unwrap(), "错误：端口被占用\n$");
+        assert!(registry.recent_text("missing", 2).is_none());
+
+        // What bash's line editor sends for Ctrl+U after typing, with a wide
+        // character counted as two cells.
+        assert_eq!(
+            plain_lines(
+                "$ # 看端口\x08\x08\x08\x08\x08\x08\x08\x08\x1b[Kss -lt\r\n",
+                5
+            ),
+            "$ ss -lt"
+        );
+        assert_eq!(plain_lines("abc\x08X\n\tz", 5), "abX\n        z");
+        assert_eq!(plain_lines("keep\x1b[2K\rnew", 5), "new");
     }
 
     #[test]

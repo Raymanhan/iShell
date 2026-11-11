@@ -546,6 +546,30 @@ fn terminal_session(app: &AppHandle, id: &str) {
         .iter()
         .any(|f| f.0 == FRAME_READY));
 
+    // What the AI command shortcut sends: Ctrl+U clears the typed `# …`
+    // line, then the suggestion is typed without being submitted.
+    terminal::terminal_input(&registry, &session, b"# show listening ports".to_vec()).unwrap();
+    terminal::terminal_input(&registry, &session, b"\x15echo replaced-$((40+2))".to_vec()).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let before_enter = String::from_utf8_lossy(&output(&first_frames)).to_string();
+    assert!(
+        !before_enter.contains("replaced-42"),
+        "nothing ran before Enter"
+    );
+    terminal::terminal_input(&registry, &session, b"\r".to_vec()).unwrap();
+    wait("the suggested command's output", &|| {
+        String::from_utf8_lossy(&output(&first_frames)).contains("replaced-42")
+    });
+    assert_eq!(
+        registry
+            .recent_text(&session, 3)
+            .unwrap()
+            .matches("show listening ports")
+            .count(),
+        0,
+        "the description line was cleared"
+    );
+
     terminal::terminal_resize(&registry, &session, 100, 30).unwrap();
     terminal::terminal_input(&registry, &session, b"stty size; exit\n".to_vec()).unwrap();
     wait("its own exit", &|| {

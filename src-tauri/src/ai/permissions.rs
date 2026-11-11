@@ -66,6 +66,13 @@ pub fn assess(name: &str, args: &Value) -> Risk {
             risk("low", "低风险", "读取文本文件，不主动修改服务器")
         };
     }
+    if name == "read_terminal" {
+        return risk(
+            "low",
+            "低风险",
+            "读取当前终端的最近输出，不在服务器上执行操作",
+        );
+    }
     if name != "shell" {
         return risk("high", "高风险", "未知工具");
     }
@@ -177,5 +184,8 @@ mod tests {
             assess("read_file", &json!({"path":"/srv/.env"})).level,
             "high"
         );
+        let terminal = assess("read_terminal", &json!({}));
+        assert_eq!(terminal.level, "low");
+        assert!(needs_approval("ask", &terminal));
     }
 }

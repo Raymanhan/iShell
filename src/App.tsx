@@ -15,6 +15,7 @@ import { BroadcastBar } from "./components/BroadcastBar";
 import { useAi } from "./features/ai/useAi";
 import { CommandHistoryPanel } from "./components/CommandHistoryPanel";
 import { useCommandHistory } from "./features/history/useCommandHistory";
+import { selectionPrompt } from "./features/shell/aiAssist";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ConnectionManager } from "./components/ConnectionManager";
 import { DownloadQueue } from "./components/DownloadQueue";
@@ -489,6 +490,13 @@ export default function App() {
     } catch (error) {
       showNotice(String(error));
     }
+  }
+
+  /** Open the AI panel on this tab with the selection quoted in the draft. */
+  function askAiAbout(tab: ShellTab, selection: string) {
+    setActiveTabId(tab.id);
+    ai.update(tab.id, (conversation) => ({ ...conversation, draft: selectionPrompt(selection) }));
+    setSidePanel("ai");
   }
 
   function pasteHistoryCommand(commandText: string) {
@@ -1726,6 +1734,8 @@ export default function App() {
                             onReady={() => handleTerminalReady(tab.id, tab.serverId, tab.title)}
                             onCommandSubmitted={(commandText) => commandHistory.record(tab.serverId, commandText)}
                             onOpenDirectory={(path) => void openTerminalDirectory(tab.id, path)}
+                            onAskAi={(selection) => askAiAbout(tab, selection)}
+                            onSuggestCommand={(request) => ai.suggestCommand(tab, request)}
                             pasteRequest={pasteRequest?.tabId === tab.id ? pasteRequest : null}
                             commandRequest={commandRequest?.tabId === tab.id ? commandRequest : null}
                             commandHistory={commandHistory.forServer(tab.serverId)}

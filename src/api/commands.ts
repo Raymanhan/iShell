@@ -77,6 +77,12 @@ export interface CommandMap {
   ai_save_history: { args: { input: AiConversation }; result: void };
   ai_delete_history: { args: { id: string }; result: void };
   ai_chat: { args: { input: ChatInput; onEvent: Channel<AiEvent> }; result: ChatResult };
+  ai_suggest_command: {
+    args: {
+      input: { serverId: string; sessionId: string; model: string; effort: string; request: string };
+    };
+    result: string;
+  };
   ai_cancel: { args: { requestId: string }; result: void };
   ai_approve: { args: { requestId: string; approvalId: string; allow: boolean }; result: void };
 
