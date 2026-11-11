@@ -102,9 +102,10 @@ pub fn run() {
             commands::sftp_read_text_file,
             commands::sftp_write_text_file,
             commands::open_terminal,
+            commands::attach_terminal,
+            commands::detach_terminal,
             commands::terminal_input,
             commands::terminal_resize,
-            commands::terminal_snapshot,
             commands::close_terminal
         ])
         .build(tauri::generate_context!())

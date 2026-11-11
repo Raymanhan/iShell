@@ -1000,7 +1000,7 @@ pub fn run_terminal(
                 match control.try_recv() {
                     Ok(TerminalControl::Input(data)) => {
                         channel
-                            .data(data.as_bytes())
+                            .data(&data[..])
                             .await
                             .map_err(|err| format!("终端写入失败：{err}"))?;
                     }

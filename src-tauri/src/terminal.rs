@@ -1,6 +1,20 @@
+//! Interactive terminal sessions.
+//!
+//! A session's output is kept as raw bytes: the remote side decides the
+//! encoding and the frontend decodes it (UTF-8 by default, or whatever the
+//! user picked), so nothing is lost or replaced on the way. Each pane showing
+//! a session subscribes with its own IPC channel and receives binary frames;
+//! attaching replays the buffered output and subscribes in one step, so no
+//! output can fall between the two.
+//!
+//! A frame is one byte of kind, eight bytes of little-endian offset, then the
+//! payload: output bytes for `FRAME_DATA` (the offset is where they start in
+//! the session's output), nothing for `FRAME_READY`, and the UTF-8 reason for
+//! `FRAME_CLOSED`.
+
 use std::{
-    collections::{HashMap, HashSet},
-    sync::{mpsc, Arc, Mutex},
+    collections::HashMap,
+    sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError},
     thread,
 };
 
@@ -12,7 +26,10 @@ use std::{
 
 #[cfg(not(russh_backend))]
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{
+    ipc::{Channel, InvokeResponseBody},
+    AppHandle,
+};
 use uuid::Uuid;
 
 #[cfg(not(russh_backend))]
@@ -21,345 +38,257 @@ use crate::models::ServerRecord;
 use crate::openssh;
 #[cfg(not(russh_backend))]
 use crate::store::jump_hops;
-use crate::{
-    models::{
-        TerminalClosedPayload, TerminalDataPayload, TerminalReadyPayload, TerminalSnapshotPayload,
-    },
-    store::{get_server, mark_connected, read_secret},
-};
+use crate::store::{get_server, mark_connected, read_secret};
 
-#[derive(Default)]
-pub struct TerminalRegistry {
-    servers: Mutex<HashMap<String, String>>,
-    sessions: Mutex<HashMap<String, mpsc::Sender<TerminalControl>>>,
-    output_buffers: Mutex<HashMap<String, String>>,
-    output_starts: Mutex<HashMap<String, usize>>,
-    output_offsets: Mutex<HashMap<String, usize>>,
-    ready_sessions: Mutex<HashSet<String>>,
-}
+pub const FRAME_DATA: u8 = 0;
+pub const FRAME_READY: u8 = 1;
+pub const FRAME_CLOSED: u8 = 2;
+
+/// Output kept per session for panes that attach later (a tab moved to
+/// another window, say). Trimmed in batches once it passes the maximum.
+const MAX_BUFFER_BYTES: usize = 512 * 1024;
+const TARGET_BUFFER_BYTES: usize = 384 * 1024;
+/// More panes than this on one session means some never detached.
+const MAX_SUBSCRIBERS: usize = 8;
 
 pub(crate) enum TerminalControl {
-    Input(String),
+    Input(Vec<u8>),
     Resize { cols: u16, rows: u16 },
     Close,
 }
 
-#[derive(Default)]
-struct Utf8StreamDecoder {
-    pending: Vec<u8>,
+fn frame(kind: u8, offset: u64, payload: &[u8]) -> InvokeResponseBody {
+    let mut bytes = Vec::with_capacity(9 + payload.len());
+    bytes.push(kind);
+    bytes.extend_from_slice(&offset.to_le_bytes());
+    bytes.extend_from_slice(payload);
+    InvokeResponseBody::Raw(bytes)
 }
 
-impl Utf8StreamDecoder {
-    fn push(&mut self, bytes: &[u8]) -> String {
-        self.pending.extend_from_slice(bytes);
-        let mut output = String::new();
+struct Session {
+    server_id: String,
+    control: mpsc::Sender<TerminalControl>,
+    /// The most recent output; `start` is its offset in the whole output.
+    buffer: Vec<u8>,
+    start: u64,
+    ready: bool,
+    closed: Option<String>,
+    subscribers: Vec<Channel>,
+}
 
-        loop {
-            match std::str::from_utf8(&self.pending) {
-                Ok(text) => {
-                    output.push_str(text);
-                    self.pending.clear();
-                    break;
-                }
-                Err(error) => {
-                    let valid_up_to = error.valid_up_to();
-                    if valid_up_to > 0 {
-                        let valid = std::str::from_utf8(&self.pending[..valid_up_to])
-                            .expect("validated UTF-8 prefix");
-                        output.push_str(valid);
-                        self.pending.drain(..valid_up_to);
-                    }
+impl Session {
+    fn end(&self) -> u64 {
+        self.start + self.buffer.len() as u64
+    }
 
-                    match error.error_len() {
-                        Some(length) => {
-                            output.push('\u{fffd}');
-                            self.pending.drain(..length);
-                        }
-                        None => break,
-                    }
-                }
-            }
+    /// Send to every subscriber, dropping those whose window has gone.
+    fn broadcast(&mut self, kind: u8, offset: u64, payload: &[u8]) {
+        self.subscribers
+            .retain(|channel| channel.send(frame(kind, offset, payload)).is_ok());
+    }
+
+    fn push_output(&mut self, data: &[u8]) {
+        let offset = self.end();
+        self.buffer.extend_from_slice(data);
+        if self.buffer.len() > MAX_BUFFER_BYTES {
+            let drop = self.buffer.len() - TARGET_BUFFER_BYTES;
+            self.buffer.drain(..drop);
+            self.start += drop as u64;
         }
-
-        output
+        self.broadcast(FRAME_DATA, offset, data);
     }
 
-    #[cfg(any(not(russh_backend), test))]
-    fn finish(&mut self) -> String {
-        let output = String::from_utf8_lossy(&self.pending).to_string();
-        self.pending.clear();
-        output
+    /// Replay what this session has to a new subscriber.
+    fn replay(&self, channel: &Channel) -> Result<(), String> {
+        let send = |body| channel.send(body).map_err(|err| err.to_string());
+        if !self.buffer.is_empty() {
+            send(frame(FRAME_DATA, self.start, &self.buffer))?;
+        }
+        if self.ready {
+            send(frame(FRAME_READY, self.end(), &[]))?;
+        }
+        if let Some(reason) = &self.closed {
+            send(frame(FRAME_CLOSED, self.end(), reason.as_bytes()))?;
+        }
+        Ok(())
     }
 }
 
-#[cfg(not(russh_backend))]
-const CONNECTED_MARKER: &str = "[iShell] connected";
+#[derive(Default)]
+pub struct TerminalRegistry {
+    sessions: Mutex<HashMap<String, Arc<Mutex<Session>>>>,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 impl TerminalRegistry {
-    pub(crate) fn connected_to(&self, session_id: &str, server_id: &str) -> bool {
-        self.servers
-            .lock()
-            .is_ok_and(|servers| servers.get(session_id).is_some_and(|id| id == server_id))
-            && self
-                .sessions
-                .lock()
-                .is_ok_and(|sessions| sessions.contains_key(session_id))
-            && self
-                .ready_sessions
-                .lock()
-                .is_ok_and(|sessions| sessions.contains(session_id))
+    fn session(&self, session_id: &str) -> Option<Arc<Mutex<Session>>> {
+        lock(&self.sessions).get(session_id).cloned()
     }
 
-    fn remove_session(&self, session_id: &str) {
-        if let Ok(mut servers) = self.servers.lock() {
-            servers.remove(session_id);
+    fn with_session<T>(
+        &self,
+        session_id: &str,
+        action: impl FnOnce(&mut Session) -> T,
+    ) -> Option<T> {
+        self.session(session_id)
+            .map(|session| action(&mut lock(&session)))
+    }
+
+    /// Whether `session_id` is a live, logged-in terminal to `server_id`.
+    pub(crate) fn connected_to(&self, session_id: &str, server_id: &str) -> bool {
+        self.with_session(session_id, |session| {
+            session.server_id == server_id && session.ready && session.closed.is_none()
+        })
+        .unwrap_or(false)
+    }
+
+    /// The last `max_bytes` of a session's output.
+    #[allow(dead_code)]
+    pub(crate) fn recent_output(&self, session_id: &str, max_bytes: usize) -> Option<Vec<u8>> {
+        self.with_session(session_id, |session| {
+            let skip = session.buffer.len().saturating_sub(max_bytes);
+            session.buffer[skip..].to_vec()
+        })
+    }
+
+    fn output(&self, session_id: &str, data: &[u8]) {
+        if !data.is_empty() {
+            self.with_session(session_id, |session| session.push_output(data));
         }
-        if let Ok(mut sessions) = self.sessions.lock() {
-            sessions.remove(session_id);
-        }
+    }
+
+    fn mark_ready(&self, session_id: &str) {
+        self.with_session(session_id, |session| {
+            if !session.ready {
+                session.ready = true;
+                let end = session.end();
+                session.broadcast(FRAME_READY, end, &[]);
+            }
+        });
+    }
+
+    /// The session ended on its own. It stays registered, so a pane that
+    /// attaches later still shows its output and why it ended, until closed.
+    fn mark_closed(&self, session_id: &str, reason: String) {
+        self.with_session(session_id, |session| {
+            let end = session.end();
+            session.broadcast(FRAME_CLOSED, end, reason.as_bytes());
+            session.closed = Some(reason);
+        });
+    }
+
+    fn send(&self, session_id: &str, control: TerminalControl) -> Result<(), String> {
+        let sender = self
+            .with_session(session_id, |session| {
+                session.closed.is_none().then(|| session.control.clone())
+            })
+            .ok_or_else(|| "找不到终端会话".to_string())?
+            .ok_or_else(|| "终端会话已关闭，请重新连接".to_string())?;
+        sender
+            .send(control)
+            .map_err(|_| "终端会话已关闭，请重新连接".to_string())
     }
 }
 
 pub fn open_terminal(
     app: AppHandle,
-    registry: State<'_, Arc<TerminalRegistry>>,
-    id: String,
+    registry: &Arc<TerminalRegistry>,
+    server_id: String,
+    channel: Option<Channel>,
 ) -> Result<String, String> {
     let session_id = Uuid::new_v4().to_string();
     let (sender, receiver) = mpsc::channel::<TerminalControl>();
-    registry
-        .servers
-        .lock()
-        .map_err(|_| "终端服务器表已锁定".to_string())?
-        .insert(session_id.clone(), id.clone());
+    lock(&registry.sessions).insert(
+        session_id.clone(),
+        Arc::new(Mutex::new(Session {
+            server_id: server_id.clone(),
+            control: sender,
+            buffer: Vec::new(),
+            start: 0,
+            ready: false,
+            closed: None,
+            subscribers: channel.into_iter().collect(),
+        })),
+    );
 
-    registry
-        .sessions
-        .lock()
-        .map_err(|_| "终端会话表已锁定".to_string())?
-        .insert(session_id.clone(), sender);
-    registry
-        .output_buffers
-        .lock()
-        .map_err(|_| "终端输出缓冲已锁定".to_string())?
-        .insert(session_id.clone(), String::new());
-    registry
-        .output_starts
-        .lock()
-        .map_err(|_| "终端输出偏移已锁定".to_string())?
-        .insert(session_id.clone(), 0);
-    registry
-        .output_offsets
-        .lock()
-        .map_err(|_| "终端输出偏移已锁定".to_string())?
-        .insert(session_id.clone(), 0);
-    registry
-        .ready_sessions
-        .lock()
-        .map_err(|_| "终端就绪状态已锁定".to_string())?
-        .remove(&session_id);
-
-    let thread_app = app.clone();
+    let thread_registry = registry.clone();
     let thread_session_id = session_id.clone();
-    let thread_registry = registry.inner().clone();
     thread::spawn(move || {
         let result = run_terminal_thread(
-            thread_app.clone(),
+            app,
             thread_registry.clone(),
             thread_session_id.clone(),
-            id,
+            server_id,
             receiver,
         );
-        if let Err(reason) = result {
-            let _ = thread_app.emit(
-                "terminal:closed",
-                TerminalClosedPayload {
-                    session_id: thread_session_id.clone(),
-                    reason,
-                },
-            );
-        }
-        thread_registry.remove_session(&thread_session_id);
+        let reason = result.err().unwrap_or_else(|| "终端已关闭".to_string());
+        thread_registry.mark_closed(&thread_session_id, reason);
     });
 
     Ok(session_id)
 }
 
-pub fn terminal_input(
-    registry: State<'_, Arc<TerminalRegistry>>,
-    session_id: String,
-    data: String,
+/// Subscribe `channel` to a session, first replaying its buffered output.
+pub fn attach_terminal(
+    registry: &TerminalRegistry,
+    session_id: &str,
+    channel: Channel,
 ) -> Result<(), String> {
-    let sender = registry
-        .sessions
-        .lock()
-        .map_err(|_| "终端会话表已锁定".to_string())?
-        .get(&session_id)
-        .cloned()
-        .ok_or_else(|| "找不到终端会话".to_string())?;
+    registry
+        .with_session(session_id, |session| {
+            session.replay(&channel)?;
+            if session.subscribers.len() >= MAX_SUBSCRIBERS {
+                session.subscribers.remove(0);
+            }
+            session.subscribers.push(channel);
+            Ok(())
+        })
+        .unwrap_or_else(|| Err("找不到终端会话".to_string()))
+}
 
-    sender.send(TerminalControl::Input(data)).map_err(|_| {
-        registry.inner().remove_session(&session_id);
-        "终端会话已关闭，请重新连接".to_string()
-    })
+/// Stop sending to the pane whose channel has this id.
+pub fn detach_terminal(registry: &TerminalRegistry, session_id: &str, channel_id: u32) {
+    registry.with_session(session_id, |session| {
+        session
+            .subscribers
+            .retain(|channel| channel.id() != channel_id)
+    });
+}
+
+pub fn terminal_input(
+    registry: &TerminalRegistry,
+    session_id: &str,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    registry.send(session_id, TerminalControl::Input(data))
 }
 
 pub fn terminal_resize(
-    registry: State<'_, Arc<TerminalRegistry>>,
-    session_id: String,
+    registry: &TerminalRegistry,
+    session_id: &str,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let sender = registry
-        .sessions
-        .lock()
-        .map_err(|_| "终端会话表已锁定".to_string())?
-        .get(&session_id)
-        .cloned()
-        .ok_or_else(|| "找不到终端会话".to_string())?;
-
-    sender
-        .send(TerminalControl::Resize {
+    registry.send(
+        session_id,
+        TerminalControl::Resize {
             cols: cols.max(1),
             rows: rows.max(1),
-        })
-        .map_err(|_| {
-            registry.inner().remove_session(&session_id);
-            "终端会话已关闭，请重新连接".to_string()
-        })
-}
-
-pub fn close_terminal(
-    registry: State<'_, Arc<TerminalRegistry>>,
-    session_id: String,
-) -> Result<(), String> {
-    if let Ok(mut servers) = registry.servers.lock() {
-        servers.remove(&session_id);
-    }
-    if let Some(sender) = registry
-        .sessions
-        .lock()
-        .map_err(|_| "终端会话表已锁定".to_string())?
-        .remove(&session_id)
-    {
-        let _ = sender.send(TerminalControl::Close);
-    }
-    if let Ok(mut buffers) = registry.output_buffers.lock() {
-        buffers.remove(&session_id);
-    }
-    if let Ok(mut starts) = registry.output_starts.lock() {
-        starts.remove(&session_id);
-    }
-    if let Ok(mut offsets) = registry.output_offsets.lock() {
-        offsets.remove(&session_id);
-    }
-    if let Ok(mut ready_sessions) = registry.ready_sessions.lock() {
-        ready_sessions.remove(&session_id);
-    }
-
-    Ok(())
-}
-
-pub fn terminal_snapshot(
-    registry: State<'_, Arc<TerminalRegistry>>,
-    session_id: String,
-) -> Result<TerminalSnapshotPayload, String> {
-    terminal_snapshot_inner(registry.inner(), &session_id)
-}
-
-fn terminal_snapshot_inner(
-    registry: &TerminalRegistry,
-    session_id: &str,
-) -> Result<TerminalSnapshotPayload, String> {
-    let data = registry
-        .output_buffers
-        .lock()
-        .map_err(|_| "终端输出缓冲已锁定".to_string())?
-        .get(session_id)
-        .cloned()
-        .unwrap_or_default();
-    let start_offset = registry
-        .output_starts
-        .lock()
-        .map_err(|_| "终端输出偏移已锁定".to_string())?
-        .get(session_id)
-        .copied()
-        .unwrap_or_default();
-    let end_offset = start_offset + data.chars().count();
-    let ready = registry
-        .ready_sessions
-        .lock()
-        .map_err(|_| "终端就绪状态已锁定".to_string())?
-        .contains(session_id);
-
-    Ok(TerminalSnapshotPayload {
-        data,
-        start_offset,
-        end_offset,
-        ready,
-    })
-}
-
-fn emit_terminal_data(
-    app: &AppHandle,
-    registry: &TerminalRegistry,
-    session_id: &str,
-    data: String,
-) {
-    let offset = registry
-        .output_offsets
-        .lock()
-        .map(|mut offsets| {
-            let offset = offsets.entry(session_id.to_string()).or_default();
-            let current = *offset;
-            *offset += data.chars().count();
-            current
-        })
-        .unwrap_or_default();
-
-    if let Ok(mut buffers) = registry.output_buffers.lock() {
-        let buffer = buffers.entry(session_id.to_string()).or_default();
-        buffer.push_str(&data);
-        const MAX_BUFFER_BYTES: usize = 256 * 1024;
-        const TARGET_BUFFER_BYTES: usize = 192 * 1024;
-        if buffer.len() > MAX_BUFFER_BYTES {
-            // Trim in larger batches instead of shifting a nearly 256 KiB String
-            // on every small terminal chunk after the buffer reaches its cap.
-            let keep_from = buffer.len() - TARGET_BUFFER_BYTES;
-            let trim_from = buffer
-                .char_indices()
-                .find(|(index, _)| *index >= keep_from)
-                .map(|(index, _)| index)
-                .unwrap_or(keep_from);
-            let drained_chars = buffer[..trim_from].chars().count();
-            buffer.drain(..trim_from);
-            if let Ok(mut starts) = registry.output_starts.lock() {
-                *starts.entry(session_id.to_string()).or_default() += drained_chars;
-            }
-        }
-    }
-
-    let _ = app.emit(
-        "terminal:data",
-        TerminalDataPayload {
-            session_id: session_id.to_string(),
-            offset,
-            data,
         },
-    );
+    )
 }
 
-fn emit_terminal_ready(app: &AppHandle, registry: &TerminalRegistry, session_id: &str) {
-    if let Ok(mut ready_sessions) = registry.ready_sessions.lock() {
-        ready_sessions.insert(session_id.to_string());
+pub fn close_terminal(registry: &TerminalRegistry, session_id: &str) {
+    if let Some(session) = lock(&registry.sessions).remove(session_id) {
+        let _ = lock(&session).control.send(TerminalControl::Close);
     }
-    let _ = app.emit(
-        "terminal:ready",
-        TerminalReadyPayload {
-            session_id: session_id.to_string(),
-        },
-    );
 }
+
+#[cfg(not(russh_backend))]
+const CONNECTED_MARKER: &str = "[iShell] connected";
 
 #[cfg(not(russh_backend))]
 fn strip_ansi_sequences(value: &str) -> String {
@@ -400,19 +329,13 @@ fn strip_ansi_sequences(value: &str) -> String {
     output
 }
 
+/// Keep the last `max_bytes` of `value`.
 #[cfg(not(russh_backend))]
-fn keep_recent_tail(value: &mut String, max_bytes: usize) {
-    if value.len() <= max_bytes {
-        return;
+fn keep_recent_tail(value: &mut Vec<u8>, max_bytes: usize) {
+    if value.len() > max_bytes {
+        let drop = value.len() - max_bytes;
+        value.drain(..drop);
     }
-
-    let keep_from = value.len() - max_bytes;
-    let drain_to = value
-        .char_indices()
-        .find(|(index, _)| *index >= keep_from)
-        .map(|(index, _)| index)
-        .unwrap_or(keep_from);
-    value.drain(..drain_to);
 }
 
 #[cfg(not(russh_backend))]
@@ -537,57 +460,50 @@ fn run_terminal_thread(
     let should_autofill_password = saved_secret.is_some() && hops.is_empty();
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
-        let mut decoder = Utf8StreamDecoder::default();
-        let mut output_tail = String::new();
-        let mut connection_tail = String::new();
+        // Recent bytes while connecting, read only to spot prompts and the
+        // login; what reaches the terminal is the raw output.
+        let mut connection_tail = Vec::new();
         let mut password_prompt_seen = false;
         let mut connected_seen = false;
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
-                    let tail = decoder.finish();
-                    if !tail.is_empty() {
-                        emit_terminal_data(&read_app, &read_registry, &read_session_id, tail);
-                    }
                     let _ = read_done_sender.send("远程终端已关闭".to_string());
                     break;
                 }
                 Ok(size) => {
-                    let data = decoder.push(&buffer[..size]);
-                    if data.is_empty() {
-                        continue;
-                    }
+                    let data = &buffer[..size];
                     if !connected_seen {
-                        connection_tail.push_str(&data);
+                        connection_tail.extend_from_slice(data);
                         keep_recent_tail(&mut connection_tail, 1024);
-                        if connection_tail.contains(CONNECTED_MARKER) {
-                            connected_seen = true;
-                            mark_connected(&read_app, &read_server_id).ok();
-                            emit_terminal_ready(&read_app, &read_registry, &read_session_id);
-                        } else if looks_like_shell_ready(&connection_tail) {
-                            connected_seen = true;
-                            mark_connected(&read_app, &read_server_id).ok();
-                            emit_terminal_ready(&read_app, &read_registry, &read_session_id);
-                            emit_terminal_data(
-                                &read_app,
-                                &read_registry,
-                                &read_session_id,
-                                "\r\n[iShell] connected via OpenSSH\r\n".into(),
-                            );
-                        }
-                    }
-                    // Only answer authentication prompts while the SSH session is
-                    // still connecting. Never inject a saved account password or
-                    // key passphrase into later remote prompts such as sudo.
-                    if should_autofill_password && !password_prompt_seen && !connected_seen {
-                        output_tail.push_str(&data);
-                        keep_recent_tail(&mut output_tail, 1024);
-                        if looks_like_password_prompt(&output_tail) {
+                        let tail = String::from_utf8_lossy(&connection_tail);
+                        // Only answer authentication prompts while the SSH
+                        // session is still connecting. Never inject a saved
+                        // password into later remote prompts such as sudo.
+                        if should_autofill_password
+                            && !password_prompt_seen
+                            && looks_like_password_prompt(&tail)
+                        {
                             password_prompt_seen = true;
                             let _ = password_prompt_sender.send(());
                         }
+                        if tail.contains(CONNECTED_MARKER) {
+                            connected_seen = true;
+                            mark_connected(&read_app, &read_server_id).ok();
+                            read_registry.mark_ready(&read_session_id);
+                        } else if looks_like_shell_ready(&tail) {
+                            connected_seen = true;
+                            mark_connected(&read_app, &read_server_id).ok();
+                            read_registry.mark_ready(&read_session_id);
+                            read_registry.output(&read_session_id, data);
+                            read_registry.output(
+                                &read_session_id,
+                                b"\r\n[iShell] connected via OpenSSH\r\n",
+                            );
+                            continue;
+                        }
                     }
-                    emit_terminal_data(&read_app, &read_registry, &read_session_id, data);
+                    read_registry.output(&read_session_id, data);
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(err) => {
@@ -598,12 +514,7 @@ fn run_terminal_thread(
         }
     });
 
-    emit_terminal_data(
-        &app,
-        &registry,
-        &session_id,
-        "\r\n[iShell] OpenSSH started\r\n".into(),
-    );
+    registry.output(&session_id, b"\r\n[iShell] OpenSSH started\r\n");
 
     loop {
         if password_prompt_receiver.try_recv().is_ok() {
@@ -628,7 +539,7 @@ fn run_terminal_thread(
 
         match receiver.recv_timeout(Duration::from_millis(80)) {
             Ok(TerminalControl::Input(data)) => {
-                if let Err(err) = writer.write_all(data.as_bytes()) {
+                if let Err(err) = writer.write_all(&data) {
                     invocation.cleanup();
                     return Err(format!("终端写入失败：{err}"));
                 }
@@ -645,19 +556,13 @@ fn run_terminal_thread(
                     return Err(format!("无法调整终端尺寸：{err}"));
                 }
             }
-            Ok(TerminalControl::Close) => {
+            Ok(TerminalControl::Close) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 invocation.cleanup();
                 return Ok(());
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                invocation.cleanup();
-                return Ok(());
-            }
         }
     }
 }
@@ -680,38 +585,19 @@ fn run_terminal_thread(
         .ok()
         .filter(|password| !password.is_empty());
 
-    emit_terminal_data(
-        &app,
-        &registry,
+    registry.output(
         &session_id,
-        "\r\n[iShell] 正在通过 russh 连接...\r\n".into(),
+        "\r\n[iShell] 正在通过 russh 连接...\r\n".as_bytes(),
     );
 
-    let ready_app = app.clone();
-    let ready_server_id = server_id.clone();
     let ready_registry = registry.clone();
     let ready_session_id = session_id.clone();
     let on_ready = move || {
-        mark_connected(&ready_app, &ready_server_id).ok();
-        emit_terminal_ready(&ready_app, &ready_registry, &ready_session_id);
-        emit_terminal_data(
-            &ready_app,
-            &ready_registry,
-            &ready_session_id,
-            "\r\n[iShell] connected via russh\r\n".into(),
-        );
+        mark_connected(&app, &server_id).ok();
+        ready_registry.mark_ready(&ready_session_id);
+        ready_registry.output(&ready_session_id, b"\r\n[iShell] connected via russh\r\n");
     };
-
-    let data_app = app.clone();
-    let data_registry = registry.clone();
-    let data_session_id = session_id.clone();
-    let mut decoder = Utf8StreamDecoder::default();
-    let on_data = move |data: &[u8]| {
-        let text = decoder.push(data);
-        if !text.is_empty() {
-            emit_terminal_data(&data_app, &data_registry, &data_session_id, text);
-        }
-    };
+    let on_data = move |data: &[u8]| registry.output(&session_id, data);
 
     crate::russh_transport::run_terminal(
         &server,
@@ -726,22 +612,125 @@ fn run_terminal_thread(
 
 #[cfg(test)]
 mod tests {
-    use super::Utf8StreamDecoder;
+    use super::*;
 
-    #[test]
-    fn decodes_multibyte_text_split_across_chunks() {
-        let mut decoder = Utf8StreamDecoder::default();
-        let bytes = "中文".as_bytes();
+    /// A channel that records the frames it is sent.
+    fn recording_channel() -> (Channel, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let sink = frames.clone();
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Raw(bytes) = body {
+                sink.lock().unwrap().push(bytes);
+            }
+            Ok(())
+        });
+        (channel, frames)
+    }
 
-        assert_eq!(decoder.push(&bytes[..2]), "");
-        assert_eq!(decoder.push(&bytes[2..4]), "中");
-        assert_eq!(decoder.push(&bytes[4..]), "文");
-        assert_eq!(decoder.finish(), "");
+    fn decode(frame: &[u8]) -> (u8, u64, &[u8]) {
+        (
+            frame[0],
+            u64::from_le_bytes(frame[1..9].try_into().unwrap()),
+            &frame[9..],
+        )
+    }
+
+    fn registry_with_session(subscriber: Channel) -> (Arc<TerminalRegistry>, String) {
+        let registry = Arc::new(TerminalRegistry::default());
+        let (control, _receiver) = mpsc::channel();
+        std::mem::forget(_receiver);
+        lock(&registry.sessions).insert(
+            "s".into(),
+            Arc::new(Mutex::new(Session {
+                server_id: "server".into(),
+                control,
+                buffer: Vec::new(),
+                start: 0,
+                ready: false,
+                closed: None,
+                subscribers: vec![subscriber],
+            })),
+        );
+        (registry, "s".into())
     }
 
     #[test]
-    fn replaces_invalid_utf8_without_losing_following_text() {
-        let mut decoder = Utf8StreamDecoder::default();
-        assert_eq!(decoder.push(&[0xff, b'o', b'k']), "\u{fffd}ok");
+    fn output_reaches_subscribers_as_raw_bytes_with_offsets() {
+        let (channel, frames) = recording_channel();
+        let (registry, id) = registry_with_session(channel);
+        // Split inside a multi-byte character, and not UTF-8 at all (GBK).
+        let text = "中文".as_bytes();
+        registry.output(&id, &text[..2]);
+        registry.output(&id, &text[2..]);
+        registry.output(&id, &[0xd6, 0xd0]);
+        registry.mark_ready(&id);
+        registry.mark_ready(&id);
+
+        let frames = frames.lock().unwrap();
+        let decoded: Vec<_> = frames.iter().map(|frame| decode(frame)).collect();
+        assert_eq!(decoded[0], (FRAME_DATA, 0, &text[..2]));
+        assert_eq!(decoded[1], (FRAME_DATA, 2, &text[2..]));
+        assert_eq!(decoded[2], (FRAME_DATA, 6, &[0xd6, 0xd0][..]));
+        assert_eq!(decoded[3], (FRAME_READY, 8, &[][..]));
+        assert_eq!(decoded.len(), 4, "ready is announced once");
+        assert!(registry.connected_to(&id, "server"));
+        assert!(!registry.connected_to(&id, "other"));
+    }
+
+    #[test]
+    fn attaching_replays_the_buffer_and_the_session_state() {
+        let (first, _) = recording_channel();
+        let (registry, id) = registry_with_session(first);
+        registry.output(&id, b"hello ");
+        registry.mark_ready(&id);
+        registry.output(&id, b"world");
+        registry.mark_closed(&id, "远程终端已关闭".into());
+        assert!(!registry.connected_to(&id, "server"));
+        assert!(terminal_input(&registry, &id, b"x".to_vec()).is_err());
+
+        let (late, frames) = recording_channel();
+        attach_terminal(&registry, &id, late).unwrap();
+        let frames = frames.lock().unwrap();
+        let decoded: Vec<_> = frames.iter().map(|frame| decode(frame)).collect();
+        assert_eq!(decoded[0], (FRAME_DATA, 0, &b"hello world"[..]));
+        assert_eq!(decoded[1], (FRAME_READY, 11, &[][..]));
+        assert_eq!(decoded[2], (FRAME_CLOSED, 11, "远程终端已关闭".as_bytes()));
+        assert!(attach_terminal(&registry, "missing", recording_channel().0).is_err());
+    }
+
+    #[test]
+    fn the_buffer_is_trimmed_and_offsets_keep_counting() {
+        let (channel, _) = recording_channel();
+        let (registry, id) = registry_with_session(channel);
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..10 {
+            registry.output(&id, &chunk);
+        }
+        let (start, len) = registry
+            .with_session(&id, |session| (session.start, session.buffer.len()))
+            .unwrap();
+        assert!(len <= MAX_BUFFER_BYTES);
+        assert_eq!(start + len as u64, 10 * 64 * 1024);
+        assert_eq!(registry.recent_output(&id, 3).unwrap(), b"xxx");
+
+        let (late, frames) = recording_channel();
+        attach_terminal(&registry, &id, late).unwrap();
+        assert_eq!(decode(&frames.lock().unwrap()[0]).1, start);
+    }
+
+    #[test]
+    fn detached_panes_stop_receiving() {
+        let (first, first_frames) = recording_channel();
+        let first_id = first.id();
+        let (registry, id) = registry_with_session(first);
+        let (second, second_frames) = recording_channel();
+        attach_terminal(&registry, &id, second).unwrap();
+        detach_terminal(&registry, &id, first_id);
+        registry.output(&id, b"after");
+        assert!(first_frames.lock().unwrap().is_empty());
+        assert_eq!(second_frames.lock().unwrap().len(), 1);
+
+        close_terminal(&registry, &id);
+        assert!(registry.session(&id).is_none());
     }
 }

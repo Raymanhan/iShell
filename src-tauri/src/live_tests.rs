@@ -409,6 +409,25 @@ fn streaming(app: &AppHandle, id: &str, base: &str) {
     let status = ssh::fetch_status(&SshPool, app, id, true).unwrap();
     assert!(status.memory_total_mb.unwrap_or(0) > 0);
     assert!(!status.disk_mounts.is_empty());
+
+    // The metrics stream: a round about every second, disk on the first.
+    let samples = std::cell::RefCell::new(Vec::new());
+    let started = Instant::now();
+    ssh::stream_metrics(
+        app,
+        id,
+        || samples.borrow().len() >= 3 || started.elapsed() > Duration::from_secs(20),
+        |sample| samples.borrow_mut().push(sample),
+    )
+    .expect("stopping the metrics stream is not an error");
+    let samples = samples.into_inner();
+    assert!(samples.len() >= 3, "only {} rounds", samples.len());
+    assert!(samples[0].has_disk && !samples[0].status.disk_mounts.is_empty());
+    assert!(!samples[1].has_disk);
+    assert!(samples
+        .iter()
+        .all(|s| s.status.memory_total_mb.unwrap_or(0) > 0));
+    assert!(samples[2].network.sampled_at - samples[0].network.sampled_at >= 1.5);
 }
 
 fn port_forward(app: &AppHandle, id: &str, live: &Live) {
@@ -451,6 +470,98 @@ fn port_forward(app: &AppHandle, id: &str, live: &Live) {
     stream.read_exact(&mut banner).unwrap();
     assert_eq!(&banner, b"SSH-");
     stop();
+}
+
+/// An interactive session: login, typed input, non-UTF-8 output kept as is,
+/// a late pane catching up, and closing.
+fn terminal_session(app: &AppHandle, id: &str) {
+    use crate::terminal::{self, FRAME_CLOSED, FRAME_DATA, FRAME_READY};
+    use tauri::ipc::{Channel, InvokeResponseBody};
+
+    type Frames = Arc<Mutex<Vec<(u8, u64, Vec<u8>)>>>;
+    fn recorder() -> (Channel, Frames) {
+        let frames: Frames = Arc::default();
+        let sink = frames.clone();
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Raw(bytes) = body {
+                let offset = u64::from_le_bytes(bytes[1..9].try_into().unwrap());
+                sink.lock()
+                    .unwrap()
+                    .push((bytes[0], offset, bytes[9..].to_vec()));
+            }
+            Ok(())
+        });
+        (channel, frames)
+    }
+    fn output(frames: &Frames) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (kind, offset, payload) in frames.lock().unwrap().iter() {
+            if *kind == FRAME_DATA {
+                // Keep what is new past `offset`, as a pane does.
+                let skip = (bytes.len() as u64).saturating_sub(*offset) as usize;
+                bytes.extend_from_slice(&payload[skip.min(payload.len())..]);
+            }
+        }
+        bytes
+    }
+    let wait = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done() {
+            assert!(Instant::now() < deadline, "terminal never showed {what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    let registry = Arc::new(terminal::TerminalRegistry::default());
+    let (first, first_frames) = recorder();
+    let session = terminal::open_terminal(app.clone(), &registry, id.into(), Some(first)).unwrap();
+    wait("ready", &|| {
+        first_frames
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|f| f.0 == FRAME_READY)
+    });
+    assert!(registry.connected_to(&session, id));
+
+    // Bytes that are not UTF-8 ("中文" in GBK) must arrive untouched.
+    terminal::terminal_input(
+        &registry,
+        &session,
+        b"printf 'gbk:\\326\\320\\316\\304:end\\n'\n".to_vec(),
+    )
+    .unwrap();
+    let gbk = b"gbk:\xd6\xd0\xce\xc4:end";
+    wait("raw output", &|| {
+        output(&first_frames).windows(gbk.len()).any(|w| w == gbk)
+    });
+
+    // A second pane gets the same output from the start.
+    let (late, late_frames) = recorder();
+    terminal::attach_terminal(&registry, &session, late).unwrap();
+    assert_eq!(output(&late_frames), output(&first_frames));
+    assert!(late_frames
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|f| f.0 == FRAME_READY));
+
+    terminal::terminal_resize(&registry, &session, 100, 30).unwrap();
+    terminal::terminal_input(&registry, &session, b"stty size; exit\n".to_vec()).unwrap();
+    wait("its own exit", &|| {
+        late_frames
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|f| f.0 == FRAME_CLOSED)
+    });
+    let text = String::from_utf8_lossy(&output(&late_frames)).to_string();
+    assert!(
+        text.contains("30 100"),
+        "resize reached the remote PTY: {text}"
+    );
+    assert!(!registry.connected_to(&session, id));
+    terminal::close_terminal(&registry, &session);
 }
 
 #[test]
@@ -528,6 +639,9 @@ fn live_ssh_end_to_end() {
     transfers(&app, "live-password", &base, &work);
     eprintln!("-- streaming and monitoring");
     streaming(&app, "live-key", &base);
+    eprintln!("-- terminal");
+    terminal_session(&app, "live-key");
+    terminal_session(&app, "live-password");
     eprintln!("-- port forward");
     port_forward(&app, "live-key", &live);
 

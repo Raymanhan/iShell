@@ -188,28 +188,6 @@ export interface TailStatusPayload {
   message?: string | null;
 }
 
-export interface TerminalDataPayload {
-  sessionId: string;
-  offset: number;
-  data: string;
-}
-
-export interface TerminalReadyPayload {
-  sessionId: string;
-}
-
-export interface TerminalSnapshotPayload {
-  data: string;
-  startOffset: number;
-  endOffset: number;
-  ready: boolean;
-}
-
-export interface TerminalClosedPayload {
-  sessionId: string;
-  reason: string;
-}
-
 export interface Snippet {
   id: string;
   name: string;

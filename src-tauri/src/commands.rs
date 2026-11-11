@@ -11,7 +11,7 @@ use std::{
     io::{Cursor, Read, Write},
     sync::{Arc, Mutex},
 };
-use tauri::{AppHandle, State, WebviewWindow};
+use tauri::{ipc::Channel, AppHandle, State, WebviewWindow};
 use uuid::Uuid;
 
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
         ConnectionExport, ConnectionExportServer, ConnectionImport, ConnectionImportServer,
         EncryptedExportSecret, NetworkSample, PortForward, PortForwardInput, PortForwardStatus,
         ServerInput, ServerOrderInput, ServerRecord, ServerStatus, SftpEntry, Snippet,
-        SnippetInput, TerminalSnapshotPayload,
+        SnippetInput,
     },
     pool::SshPool,
     process_monitor::ProcessMonitorRegistry,
@@ -793,13 +793,35 @@ pub async fn sftp_write_text_file(
     .map_err(|err| format!("后台任务失败：{err}"))?
 }
 
+/// Start a terminal session on a server. Panes receive its output by
+/// attaching (`attach_terminal`), which replays everything so far.
 #[tauri::command]
 pub fn open_terminal(
     app: AppHandle,
     registry: State<'_, Arc<TerminalRegistry>>,
     id: String,
 ) -> Result<String, String> {
-    terminal::open_terminal(app, registry, id)
+    terminal::open_terminal(app, registry.inner(), id, None)
+}
+
+/// Show an existing session in another pane: its buffered output is replayed
+/// on `on_output`, followed by everything new.
+#[tauri::command]
+pub fn attach_terminal(
+    registry: State<'_, Arc<TerminalRegistry>>,
+    session_id: String,
+    on_output: Channel,
+) -> Result<(), String> {
+    terminal::attach_terminal(registry.inner(), &session_id, on_output)
+}
+
+#[tauri::command]
+pub fn detach_terminal(
+    registry: State<'_, Arc<TerminalRegistry>>,
+    session_id: String,
+    channel_id: u32,
+) {
+    terminal::detach_terminal(registry.inner(), &session_id, channel_id)
 }
 
 #[tauri::command]
@@ -808,7 +830,7 @@ pub fn terminal_input(
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    terminal::terminal_input(registry, session_id, data)
+    terminal::terminal_input(registry.inner(), &session_id, data.into_bytes())
 }
 
 #[tauri::command]
@@ -818,21 +840,10 @@ pub fn terminal_resize(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    terminal::terminal_resize(registry, session_id, cols, rows)
+    terminal::terminal_resize(registry.inner(), &session_id, cols, rows)
 }
 
 #[tauri::command]
-pub fn close_terminal(
-    registry: State<'_, Arc<TerminalRegistry>>,
-    session_id: String,
-) -> Result<(), String> {
-    terminal::close_terminal(registry, session_id)
-}
-
-#[tauri::command]
-pub fn terminal_snapshot(
-    registry: State<'_, Arc<TerminalRegistry>>,
-    session_id: String,
-) -> Result<TerminalSnapshotPayload, String> {
-    terminal::terminal_snapshot(registry, session_id)
+pub fn close_terminal(registry: State<'_, Arc<TerminalRegistry>>, session_id: String) {
+    terminal::close_terminal(registry.inner(), &session_id)
 }

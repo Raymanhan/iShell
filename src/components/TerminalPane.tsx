@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { Channel } from "@tauri-apps/api/core";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Terminal } from "@xterm/xterm";
@@ -10,12 +10,13 @@ import { splitShortcutDirection, type PaneRect, type SplitDirection } from "../f
 import { directoryLinkProvider } from "../features/shell/directoryLinks";
 import type { ShellTab } from "../features/shell/types";
 import { isTerminalSearchShortcut, TerminalSearchBar } from "./TerminalSearchBar";
-import type {
-  TerminalClosedPayload,
-  TerminalDataPayload,
-  TerminalReadyPayload,
-  TerminalSnapshotPayload,
-} from "../types";
+import {
+  FRAME_CLOSED,
+  FRAME_DATA,
+  FRAME_READY,
+  parseFrame,
+  TerminalOutput,
+} from "../features/shell/terminalStream";
 
 const passwordPromptPattern = /(?:password|passphrase|密码|口令)[^:\n\r]*[:：]\s*$/i;
 const platformSource = `${navigator.userAgent} ${navigator.platform}`.toLowerCase();
@@ -103,7 +104,8 @@ function TerminalPaneBase({
   const sessionRef = useRef<string | null>(tab.sessionId);
   const closedSessionRef = useRef<string | null>(null);
   const readySessionRef = useRef<string | null>(null);
-  const renderedOffsetRef = useRef<Record<string, number>>({});
+  // Decoded output per session; survives re-attaching, so nothing repeats.
+  const outputsRef = useRef<Record<string, TerminalOutput>>({});
   const connectingNoticeRef = useRef(false);
   const fitTimerRef = useRef<number | null>(null);
   const fitSettledTimerRef = useRef<number | null>(null);
@@ -156,22 +158,21 @@ function TerminalPaneBase({
     onReadyRef.current?.();
   }
 
-  function writeTerminalData(sessionId: string, offset: number, data: string) {
-    const renderedOffset = renderedOffsetRef.current[sessionId] ?? 0;
-    const dataLength = Array.from(data).length;
-    const eventEnd = offset + dataLength;
-    if (eventEnd <= renderedOffset) return;
+  function writeTerminalBytes(sessionId: string, offset: number, bytes: Uint8Array) {
+    const output = (outputsRef.current[sessionId] ??= new TerminalOutput());
+    const text = output.push(offset, bytes);
+    if (!text) return;
+    terminalRef.current?.write(text);
+    trackSensitivePrompt(text);
+  }
 
-    const overlap = Math.max(0, renderedOffset - offset);
-    const nextData = overlap > 0 ? Array.from(data).slice(overlap).join("") : data;
-    terminalRef.current?.write(nextData);
-    renderedOffsetRef.current[sessionId] = eventEnd;
-    trackSensitivePrompt(nextData);
-    // Scan the full payload, not just the part actually written: if an earlier
-    // chunk carrying the marker was dropped (e.g. a `terminal:ready`/`terminal:data`
-    // listener race on fast/reused sessions), the snapshot catch-up still delivers
-    // the whole buffer here and `overlap` trims it out of `nextData` before we can see it.
-    if (data.includes("[iShell] connected")) markReady(sessionId);
+  function showClosed(sessionId: string, reason: string) {
+    if (closedSessionRef.current === sessionId) return;
+    closedSessionRef.current = sessionId;
+    if (terminalRef.current) terminalRef.current.options.disableStdin = true;
+    terminalRef.current?.writeln(`\r\n[iShell] ${reason}`);
+    setNotice(reason);
+    onClosedRef.current?.(reason);
   }
 
   function reportTerminalSize() {
@@ -611,75 +612,29 @@ function TerminalPaneBase({
     });
   }, [fontSize]);
 
-  useEffect(() => {
-    if (!isTauri) return;
-    // `listen` resolves asynchronously. Under StrictMode the effect can be
-    // torn down before the promise settles; guard with a cancelled flag so a
-    // late-arriving listener is removed immediately, otherwise duplicate
-    // listeners write every byte of output twice.
-    let cancelled = false;
-    let unlistenData: (() => void) | undefined;
-    let unlistenReady: (() => void) | undefined;
-    let unlistenClosed: (() => void) | undefined;
-
-    listen<TerminalDataPayload>("terminal:data", (event) => {
-      if (event.payload.sessionId === sessionRef.current) {
-        writeTerminalData(event.payload.sessionId, event.payload.offset, event.payload.data);
-      }
-    }).then((unlisten) => {
-      if (cancelled) unlisten();
-      else unlistenData = unlisten;
-    });
-
-    listen<TerminalReadyPayload>("terminal:ready", (event) => {
-      if (event.payload.sessionId === sessionRef.current) {
-        markReady(event.payload.sessionId);
-      }
-    }).then((unlisten) => {
-      if (cancelled) unlisten();
-      else unlistenReady = unlisten;
-    });
-
-    listen<TerminalClosedPayload>("terminal:closed", (event) => {
-      if (event.payload.sessionId === sessionRef.current) {
-        closedSessionRef.current = event.payload.sessionId;
-        if (terminalRef.current) terminalRef.current.options.disableStdin = true;
-        terminalRef.current?.writeln(`\r\n[iShell] ${event.payload.reason}`);
-        setNotice(event.payload.reason);
-        onClosedRef.current?.(event.payload.reason);
-      }
-    }).then((unlisten) => {
-      if (cancelled) unlisten();
-      else unlistenClosed = unlisten;
-    });
-
-    return () => {
-      cancelled = true;
-      unlistenData?.();
-      unlistenReady?.();
-      unlistenClosed?.();
-    };
-  }, [setNotice]);
-
+  // Each pane subscribes to its session with a channel of its own. Attaching
+  // replays the session's buffered output and subscribes in one step, so
+  // nothing falls in between; output already shown is skipped by offset.
   useEffect(() => {
     if (!isTauri || !tab.sessionId) return;
     const sessionId = tab.sessionId;
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      const renderedOffset = renderedOffsetRef.current[sessionId] ?? 0;
-      command<TerminalSnapshotPayload>("terminal_snapshot", { sessionId })
-        .then((snapshot) => {
-          if (cancelled || sessionRef.current !== sessionId) return;
-          if (snapshot.ready) markReady(sessionId);
-          if (!snapshot.data) return;
-          if ((renderedOffsetRef.current[sessionId] ?? 0) > renderedOffset) return;
-          writeTerminalData(sessionId, snapshot.startOffset, snapshot.data);
-        })
-        .catch((error) => setNotice(String(error)));
-    }, 120);
+    let active = true;
+    const channel = new Channel<ArrayBuffer>();
+    channel.onmessage = (buffer) => {
+      if (!active || sessionRef.current !== sessionId) return;
+      const frame = parseFrame(buffer);
+      if (!frame) return;
+      if (frame.kind === FRAME_DATA) writeTerminalBytes(sessionId, frame.offset, frame.payload);
+      else if (frame.kind === FRAME_READY) markReady(sessionId);
+      else if (frame.kind === FRAME_CLOSED)
+        showClosed(sessionId, new TextDecoder().decode(frame.payload));
+    };
+    command("attach_terminal", { sessionId, onOutput: channel }).catch((error) => {
+      if (active) setNotice(String(error));
+    });
     return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
+      active = false;
+      void command("detach_terminal", { sessionId, channelId: channel.id }).catch(() => undefined);
     };
   }, [setNotice, tab.sessionId]);
 

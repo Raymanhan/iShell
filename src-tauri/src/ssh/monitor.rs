@@ -82,7 +82,20 @@ pub fn fetch_status(
     include_disk: bool,
 ) -> Result<ServerStatus, String> {
     let raw = run_remote_shell(app, id, STATUS_SCRIPT)?;
-    let sections = split_sections(&raw);
+    let disk_mounts = if include_disk {
+        parse_disk_mounts(&run_remote_shell(app, id, DISK_SCRIPT)?)
+    } else {
+        Vec::new()
+    };
+    Ok(status_from_sections(id, &split_sections(&raw), disk_mounts))
+}
+
+/// A `ServerStatus` from the `@@KEY@@` sections of `STATUS_SCRIPT`.
+pub(super) fn status_from_sections(
+    id: &str,
+    sections: &std::collections::HashMap<String, String>,
+    disk_mounts: Vec<DiskMount>,
+) -> ServerStatus {
     let section = |key: &str| sections.get(key).map(String::as_str).unwrap_or("");
 
     let (load1, load5, load15) = parse_load(section("LOAD"));
@@ -93,18 +106,12 @@ pub fn fetch_status(
     let (gpu_memory_used_mb, gpu_memory_total_mb) = parse_gpu_memory(section("VRAM"));
     let (memory_total_mb, memory_available_mb, swap_total_mb, swap_free_mb) =
         parse_memory(section("MEM"));
-    let disk_mounts = if include_disk {
-        let raw_disk = run_remote_shell(app, id, DISK_SCRIPT)?;
-        parse_disk_mounts(&raw_disk)
-    } else {
-        Vec::new()
-    };
     let root_disk = disk_mounts
         .iter()
         .find(|mount| mount.mount_point == "/")
         .or_else(|| disk_mounts.first());
     let processes = section("PROC").trim().parse::<u64>().ok();
-    Ok(ServerStatus {
+    ServerStatus {
         id: id.to_string(),
         os: section("OS").trim().to_string(),
         uptime_seconds: parse_uptime(section("UP")),
@@ -126,7 +133,102 @@ pub fn fetch_status(
         disk_mounts,
         processes,
         sampled_at: now(),
+    }
+}
+
+/// How many rounds of the metrics loop pass between disk usage readings.
+const DISK_EVERY_ROUNDS: u32 = 60;
+const FRAME_END: &str = "@@END@@";
+
+/// One remote loop that prints the status sections, network counters and,
+/// every `DISK_EVERY_ROUNDS` rounds, disk usage, about once a second. Each
+/// round ends with `@@END@@`.
+pub(super) fn metrics_loop_script() -> String {
+    format!(
+        "i=0\nwhile :; do\n( {STATUS_SCRIPT}\n)\nprintf '@@NET@@\\n'\n( {NETWORK_SCRIPT}\n)\n\
+         if [ $((i % {DISK_EVERY_ROUNDS})) -eq 0 ]; then printf '@@DISK@@\\n'; {DISK_SCRIPT}; fi\n\
+         printf '{FRAME_END}\\n'\ni=$((i + 1))\nsleep 0.8\ndone\n"
+    )
+}
+
+/// One round of the metrics loop.
+#[derive(Debug)]
+pub struct MetricsSample {
+    pub status: ServerStatus,
+    pub network: NetworkSample,
+    /// Whether this round read disk usage; otherwise `status.disk_mounts` is empty.
+    pub has_disk: bool,
+}
+
+/// Splits the metrics loop's output into rounds.
+#[derive(Default)]
+pub(super) struct MetricsStreamParser {
+    pending: Vec<u8>,
+}
+
+impl MetricsStreamParser {
+    pub(super) fn push(&mut self, id: &str, chunk: &[u8]) -> Vec<MetricsSample> {
+        self.pending.extend_from_slice(chunk);
+        let marker = format!("{FRAME_END}\n");
+        let mut samples = Vec::new();
+        while let Some(at) = find(&self.pending, marker.as_bytes()) {
+            let round: Vec<u8> = self.pending.drain(..at + marker.len()).collect();
+            let text = String::from_utf8_lossy(&round[..at]);
+            samples.push(metrics_from_round(id, &text));
+        }
+        // A round never grows this large; drop garbage rather than grow forever.
+        if self.pending.len() > 1024 * 1024 {
+            self.pending.clear();
+        }
+        samples
+    }
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn metrics_from_round(id: &str, round: &str) -> MetricsSample {
+    let sections = split_sections(round);
+    let has_disk = sections.contains_key("DISK");
+    let disk_mounts = sections
+        .get("DISK")
+        .map(|raw| parse_disk_mounts(raw))
+        .unwrap_or_default();
+    let mut counters = sections
+        .get("NET")
+        .map(String::as_str)
+        .unwrap_or("")
+        .split_whitespace()
+        .map(|part| part.parse::<u64>().unwrap_or(0));
+    MetricsSample {
+        status: status_from_sections(id, &sections, disk_mounts),
+        network: NetworkSample {
+            rx_bytes: counters.next().unwrap_or(0),
+            tx_bytes: counters.next().unwrap_or(0),
+            sampled_at: now_fractional(),
+        },
+        has_disk,
+    }
+}
+
+/// Follow a server's metrics on one long-lived channel until canceled.
+pub fn stream_metrics(
+    app: &AppHandle,
+    id: &str,
+    is_canceled: impl Fn() -> bool,
+    mut on_sample: impl FnMut(MetricsSample),
+) -> Result<(), String> {
+    let command = format!("sh -c {}", openssh::shell_quote(&metrics_loop_script()));
+    let mut parser = MetricsStreamParser::default();
+    transport::stream(app, id, &command, &is_canceled, &mut |chunk| {
+        for sample in parser.push(id, chunk) {
+            on_sample(sample);
+        }
     })
+    .map_err(|err| format!("主机监控失败：{err}"))
 }
 
 pub fn stream_process_usage(
@@ -536,6 +638,65 @@ pub(super) fn parse_disk_mounts(raw: &str) -> Vec<DiskMount> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metrics_rounds_are_split_and_parsed_across_chunks() {
+        let round = |disk: bool, rx: u64| {
+            let mut text = String::from(
+                "@@OS@@\nLinux 6.1\n@@UP@@\n3600.5 1.0\n@@LOAD@@\n0.50 0.40 0.30 1/2 3\n\
+                 @@MEM@@\nMemTotal: 2048000\nMemAvailable: 1024000\n@@CPU@@\n\n@@PROC@@\n42\n\
+                 @@CORES@@\n4\n@@GPU@@\n\n@@VRAM@@\n\n",
+            );
+            text.push_str(&format!("@@NET@@\n{rx} 2000\n"));
+            if disk {
+                text.push_str("@@DISK@@\n/dev/sda1 1000000 250000 750000 25% /\n");
+            }
+            text.push_str("@@END@@\n");
+            text
+        };
+        let stream = format!("{}{}", round(true, 1000), round(false, 5000));
+        let mut parser = MetricsStreamParser::default();
+        let mut samples = Vec::new();
+        for chunk in stream.as_bytes().chunks(7) {
+            samples.extend(parser.push("server", chunk));
+        }
+        assert_eq!(samples.len(), 2);
+        let first = &samples[0];
+        assert!(first.has_disk);
+        assert_eq!(first.status.os, "Linux 6.1");
+        assert_eq!(first.status.processes, Some(42));
+        assert_eq!(first.status.cpu_cores, Some(4));
+        assert_eq!(first.status.disk_mounts.len(), 1);
+        assert_eq!(first.status.disk_mounts[0].mount_point, "/");
+        assert_eq!(
+            (first.network.rx_bytes, first.network.tx_bytes),
+            (1000, 2000)
+        );
+        assert!(!samples[1].has_disk);
+        assert!(samples[1].status.disk_mounts.is_empty());
+        assert_eq!(samples[1].network.rx_bytes, 5000);
+    }
+
+    #[test]
+    fn the_metrics_loop_is_valid_shell_and_produces_rounds() {
+        // Run two rounds locally: the script must parse and terminate cleanly.
+        let script = metrics_loop_script().replacen("while :; do", "while [ \"$i\" -lt 2 ]; do", 1);
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut parser = MetricsStreamParser::default();
+        let samples = parser.push("local", &output.stdout);
+        assert_eq!(samples.len(), 2);
+        assert!(samples[0].has_disk && !samples[1].has_disk);
+        assert!(!samples[0].status.os.is_empty());
+    }
 
     #[test]
     fn tail_command_bounds_lines_and_quotes_remote_path() {

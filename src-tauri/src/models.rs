@@ -203,7 +203,7 @@ pub struct ProcessSamplePayload {
     pub sampled_at: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerStatus {
     pub id: String,
@@ -229,7 +229,7 @@ pub struct ServerStatus {
     pub sampled_at: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkSample {
     pub rx_bytes: u64,
@@ -237,7 +237,7 @@ pub struct NetworkSample {
     pub sampled_at: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiskMount {
     pub filesystem: String,
@@ -290,34 +290,4 @@ pub struct TailStatusPayload {
     pub viewer_id: String,
     pub state: String,
     pub message: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalDataPayload {
-    pub session_id: String,
-    pub offset: usize,
-    pub data: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalReadyPayload {
-    pub session_id: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalSnapshotPayload {
-    pub data: String,
-    pub start_offset: usize,
-    pub end_offset: usize,
-    pub ready: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalClosedPayload {
-    pub session_id: String,
-    pub reason: String,
 }
