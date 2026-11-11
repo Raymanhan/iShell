@@ -98,11 +98,9 @@ pub fn normalize_url(raw: &str) -> Result<String, String> {
 }
 
 pub fn load(app: &AppHandle) -> Result<Config, String> {
-    let conn = open_db(app)?;
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS ai_settings (id INTEGER PRIMARY KEY CHECK(id=1), encrypted BLOB NOT NULL)")
-        .map_err(|e| e.to_string())?;
     use rusqlite::OptionalExtension;
-    let blob = conn
+    // The guard is a temporary: decrypting below must not hold the database.
+    let blob = open_db(app)?
         .query_row("SELECT encrypted FROM ai_settings WHERE id=1", [], |row| {
             row.get::<_, Vec<u8>>(0)
         })

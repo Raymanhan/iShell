@@ -6,6 +6,7 @@ mod pool;
 mod process_monitor;
 #[cfg(russh_backend)]
 mod russh_transport;
+mod secrets;
 mod ssh;
 mod store;
 mod tail_monitor;
@@ -49,7 +50,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ai::ai_get_config,
-            ai::history::ai_get_history,
+            ai::history::ai_list_history,
+            ai::history::ai_load_history,
             ai::history::ai_save_history,
             ai::history::ai_delete_history,
             ai::ai_save_config,
@@ -65,6 +67,7 @@ pub fn run() {
             commands::delete_server,
             commands::list_command_history,
             commands::save_command_history,
+            commands::secret_storage,
             commands::list_snippets,
             commands::save_snippet,
             commands::delete_snippet,

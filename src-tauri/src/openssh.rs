@@ -54,15 +54,60 @@ pub fn ssh_binary() -> String {
     }
 }
 
+/// Unix socket paths are limited to about 104 bytes (macOS) or 108 (Linux).
 #[cfg(not(russh_backend))]
-pub fn control_path(server_id: &str) -> PathBuf {
+const MAX_SOCKET_PATH: usize = 100;
+/// `<slug>.sock`, with a slug of at most 18 characters.
+#[cfg(not(russh_backend))]
+const SOCKET_NAME_LEN: usize = 18 + ".sock".len();
+
+/// Make `dir` a directory only this user can enter, or report that it is not
+/// one: a symlink, someone else's directory, or one others can write to.
+#[cfg(not(russh_backend))]
+fn private_dir(dir: &Path) -> bool {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    if dir.as_os_str().len() + 1 + SOCKET_NAME_LEN > MAX_SOCKET_PATH {
+        return false;
+    }
+    let _ = fs::DirBuilder::new().mode(0o700).create(dir);
+    let Ok(metadata) = fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+        return false;
+    }
+    metadata.mode() & 0o077 == 0
+        || fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).is_ok()
+}
+
+/// The directory holding ControlMaster sockets: the session's runtime
+/// directory where there is one, otherwise a per-user directory under the
+/// temporary directory. Never a shared, world-writable location, where
+/// another local user could plant a socket under a predictable name.
+#[cfg(not(russh_backend))]
+fn control_dir() -> Option<PathBuf> {
+    let uid = unsafe { libc::geteuid() };
+    let mut candidates = Vec::new();
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty()) {
+        candidates.push(PathBuf::from(runtime).join("ishell"));
+    }
+    candidates.push(std::env::temp_dir().join(format!("ishell-{uid}")));
+    candidates.push(PathBuf::from(format!("/tmp/ishell-{uid}")));
+    candidates.into_iter().find(|dir| private_dir(dir))
+}
+
+/// The ControlMaster socket for a server, or `None` when no private directory
+/// is available and connections cannot be shared safely.
+#[cfg(not(russh_backend))]
+pub fn control_path(server_id: &str) -> Option<PathBuf> {
     let slug: String = server_id
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
         .take(18)
         .collect();
     let slug = if slug.is_empty() { "server" } else { &slug };
-    PathBuf::from(format!("/tmp/ishell-{slug}.sock"))
+    Some(control_dir()?.join(format!("{slug}.sock")))
 }
 
 /// `multiplex = true` shares one `ControlMaster` connection with the terminal
@@ -74,8 +119,7 @@ pub fn control_path(server_id: &str) -> PathBuf {
 /// on a shared socket.
 #[cfg(not(russh_backend))]
 pub fn common_ssh_args(server: &ServerRecord, multiplex: bool) -> Vec<String> {
-    let mut args = if multiplex {
-        let control_path = control_path(&server.id);
+    let mut args = if let Some(control_path) = control_path(&server.id).filter(|_| multiplex) {
         vec![
             "-o".into(),
             "ControlMaster=auto".into(),
@@ -393,6 +437,35 @@ mod tests {
                 .trim_end()
                 .to_string()
         })
+    }
+
+    #[test]
+    fn control_sockets_live_in_a_private_directory() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let path = control_path("3f2a-77c1/../x").unwrap();
+        assert_eq!(path.file_name().unwrap(), "3f2a77c1x.sock");
+        assert!(path.as_os_str().len() <= MAX_SOCKET_PATH);
+        let dir = fs::metadata(path.parent().unwrap()).unwrap();
+        assert!(dir.is_dir());
+        assert_eq!(dir.uid(), unsafe { libc::geteuid() });
+        assert_eq!(dir.permissions().mode() & 0o077, 0);
+
+        // A directory open to others is locked down before use; a symlink is refused.
+        let base = std::env::temp_dir().join(format!("ishell-ctl-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&base).unwrap();
+        let open = base.join("open");
+        fs::create_dir(&open).unwrap();
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(private_dir(&open));
+        assert_eq!(
+            fs::metadata(&open).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&open, &link).unwrap();
+        assert!(!private_dir(&link));
+        fs::remove_dir_all(base).ok();
     }
 
     #[test]

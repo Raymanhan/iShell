@@ -476,13 +476,26 @@ pub fn port_forward_statuses(tunnels: State<'_, Arc<TunnelRegistry>>) -> Vec<Por
 }
 
 #[tauri::command]
-pub fn list_command_history(app: AppHandle) -> Result<Vec<String>, String> {
-    load_command_history(&app)
+pub async fn list_command_history(
+    app: AppHandle,
+    server_id: Option<String>,
+) -> Result<Vec<String>, String> {
+    run_blocking(move || load_command_history(&app, server_id.as_deref())).await
 }
 
 #[tauri::command]
-pub fn save_command_history(app: AppHandle, command_text: String) -> Result<(), String> {
-    append_command_history(&app, &command_text)
+pub async fn save_command_history(
+    app: AppHandle,
+    server_id: Option<String>,
+    command_text: String,
+) -> Result<(), String> {
+    run_blocking(move || append_command_history(&app, server_id.as_deref(), &command_text)).await
+}
+
+/// Where the key that encrypts saved passwords is kept: `keychain` or `file`.
+#[tauri::command]
+pub async fn secret_storage(app: AppHandle) -> Result<&'static str, String> {
+    run_blocking(move || crate::secrets::storage(&app).map(|storage| storage.as_str())).await
 }
 
 #[tauri::command]

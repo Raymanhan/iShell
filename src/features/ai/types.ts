@@ -306,6 +306,50 @@ export function serverHistory(
 }
 
 /** Restoring history never resumes a tool or reuses an old approval. */
+/** A saved conversation as the history list shows it, without its body. */
+export interface AiHistorySummary {
+  id: string;
+  serverId: string;
+  title: string;
+  messageCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface AiHistoryItem extends AiHistorySummary {
+  running: boolean;
+}
+
+/**
+ * The history list for a server: saved summaries, with conversations that are
+ * open in memory taking precedence because they may have changed since.
+ */
+export function historyItems(
+  summaries: Record<string, AiHistorySummary>,
+  conversations: Record<string, AiConversation>,
+  serverId: string,
+): AiHistoryItem[] {
+  const items = new Map<string, AiHistoryItem>();
+  for (const summary of Object.values(summaries))
+    if (summary.serverId === serverId)
+      items.set(summary.id, { ...summary, running: false });
+  for (const value of serverHistory(conversations, serverId))
+    items.set(value.id, {
+      id: value.id,
+      serverId,
+      title: conversationTitle(value),
+      messageCount: value.entries.filter((entry) => entry.kind === "user").length,
+      createdAt: value.createdAt,
+      updatedAt: value.updatedAt,
+      running: Boolean(value.requestId),
+    });
+  return [...items.values()].sort(
+    (a, b) =>
+      b.updatedAt - a.updatedAt ||
+      b.createdAt - a.createdAt ||
+      a.id.localeCompare(b.id),
+  );
+}
+
 export function restoreConversation(saved: AiConversation): AiConversation {
   const interrupted = Boolean(saved.requestId);
   return {

@@ -8,12 +8,13 @@ import {
   defaultAiConfig,
   createConversation,
   restoreConversation,
-  serverHistory,
+  historyItems,
   modelSelection,
   mergeModelSources,
   type AiConfig,
   type AiConversation,
   type AiEvent,
+  type AiHistorySummary,
   type AiModel,
 } from "./types";
 
@@ -45,6 +46,13 @@ export function useAi(tabs: ShellTab[]) {
     Record<string, AiConversation>
   >({});
   const current = useRef(conversations);
+  // Saved conversations are listed from summaries; a body is fetched only
+  // when its conversation is opened.
+  const [summaries, setSummaries] = useState<Record<string, AiHistorySummary>>(
+    {},
+  );
+  const saved = useRef(summaries);
+  const opening = useRef(new Map<string, Promise<AiConversation | null>>());
   const configRef = useRef(config);
   const automaticStops = useRef(new Set<string>());
   configRef.current = config;
@@ -56,6 +64,10 @@ export function useAi(tabs: ShellTab[]) {
     delete next[id];
     current.current = next;
     setConversations(next);
+    const kept = { ...saved.current };
+    delete kept[id];
+    saved.current = kept;
+    setSummaries(kept);
     const remaining = Object.fromEntries(
       Object.entries(active.current).filter(([, selected]) => selected !== id),
     );
@@ -140,12 +152,10 @@ export function useAi(tabs: ShellTab[]) {
   async function loadHistory() {
     const generation = ++historyGeneration.current;
     try {
-      const saved = await command<AiConversation[]>("ai_get_history");
+      const list = await command<AiHistorySummary[]>("ai_list_history");
       if (generation !== historyGeneration.current) return;
-      current.current = Object.fromEntries(
-        saved.map((value) => [value.id, restoreConversation(value)]),
-      );
-      setConversations(current.current);
+      saved.current = Object.fromEntries(list.map((value) => [value.id, value]));
+      setSummaries(saved.current);
       setHistoryLoaded(true);
       setHistoryError("");
     } catch (error) {
@@ -154,9 +164,35 @@ export function useAi(tabs: ShellTab[]) {
     }
   }
 
+  /** Fetch a saved conversation's body once; concurrent callers share it. */
+  function openSaved(id: string): Promise<AiConversation | null> {
+    const loaded = current.current[id];
+    if (loaded) return Promise.resolve(loaded);
+    const pending = opening.current.get(id);
+    if (pending) return pending;
+    const request = command<AiConversation>("ai_load_history", { id })
+      .then((value) => {
+        // Deleted, or opened by another caller, while this was loading.
+        if (pendingWrites.current.get(id) === null) return null;
+        if (current.current[id]) return current.current[id];
+        const restored = restoreConversation(value);
+        current.current = { ...current.current, [id]: restored };
+        setConversations(current.current);
+        setHistoryError("");
+        return restored;
+      })
+      .catch((error) => {
+        setHistoryError(`历史记录读取失败：${error}`);
+        return null;
+      })
+      .finally(() => opening.current.delete(id));
+    opening.current.set(id, request);
+    return request;
+  }
+
   async function deleteHistory(id: string) {
     const value = current.current[id];
-    if (!value || value.requestId) return;
+    if ((!value && !saved.current[id]) || value?.requestId) return;
     if (!isTauri) {
       removeHistory(id);
       return;
@@ -176,11 +212,16 @@ export function useAi(tabs: ShellTab[]) {
   useEffect(() => {
     if (!historyLoaded || !configLoaded) return;
     for (const tab of tabs) {
-      if (!current.current[active.current[tab.id]]) {
-        const last = serverHistory(current.current, tab.serverId)[0];
-        if (last) activate(tab.id, last.id);
-        else newChat(tab);
-      }
+      if (current.current[active.current[tab.id]]) continue;
+      const last = historyItems(saved.current, current.current, tab.serverId)[0];
+      if (!last) newChat(tab);
+      else if (current.current[last.id]) activate(tab.id, last.id);
+      else
+        void openSaved(last.id).then((value) => {
+          if (current.current[active.current[tab.id]]) return;
+          if (value) activate(tab.id, value.id);
+          else newChat(tab);
+        });
     }
   }, [tabs, historyLoaded, configLoaded, activeIds]);
 
@@ -514,7 +555,8 @@ export function useAi(tabs: ShellTab[]) {
     conversations: Object.fromEntries(
       tabs.map((tab) => [tab.id, conversations[activeIds[tab.id]]]),
     ),
-    history: conversations,
+    historyFor: (serverId: string) =>
+      historyItems(summaries, conversations, serverId),
     historyLoaded,
     historyError,
     deletingIds,
@@ -523,8 +565,9 @@ export function useAi(tabs: ShellTab[]) {
       Object.values(conversations).some(
         (value) => value.serverId === serverId && value.requestId,
       ),
-    selectHistory: (tab: ShellTab, id: string) => {
-      if (current.current[id]?.serverId === tab.serverId) activate(tab.id, id);
+    selectHistory: async (tab: ShellTab, id: string) => {
+      const value = await openSaved(id);
+      if (value?.serverId === tab.serverId) activate(tab.id, id);
     },
     deleteHistory,
     newChat,

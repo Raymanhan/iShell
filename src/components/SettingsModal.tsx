@@ -1,5 +1,6 @@
-import { useState, type KeyboardEvent } from "react";
+import { useEffect, useState, type KeyboardEvent } from "react";
 import { Download, Droplets, Info, Layers, Palette, RefreshCw, Sparkles, SquareTerminal, X } from "lucide-react";
+import { command, isTauri } from "../api/tauri";
 import { AiSettings } from "./AiSettings";
 import { ReleaseHistory } from "./ReleaseHistory";
 import type { AiConfig } from "../features/ai/types";
@@ -338,6 +339,7 @@ export function SettingsModal({
                     onChange={(event) => onAutoCheckUpdatesChange(event.target.checked)}
                   />
                 </label>
+                <SecretStorageLine />
                 <ReleaseHistory currentVersion={updater.currentVersion} update={updater.update} />
               </div>
             )}
@@ -374,4 +376,35 @@ function UpdateStatusLine({ updater }: { updater: UpdaterState }) {
   }
   if (!text) return null;
   return <small className={`settings-update-status ${tone}`}>{text}</small>;
+}
+
+/** Where the key that encrypts saved passwords and AI data is kept. */
+function SecretStorageLine() {
+  const [storage, setStorage] = useState<"keychain" | "file" | "error" | null>(null);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let cancelled = false;
+    command<"keychain" | "file">("secret_storage")
+      .then((value) => !cancelled && setStorage(value))
+      .catch(() => !cancelled && setStorage("error"));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!storage) return null;
+  return (
+    <div className="settings-toggle">
+      <span>
+        凭据保护
+        <small>
+          {storage === "keychain" && "加密主密钥保存在系统钥匙串中，拷贝数据目录无法解密已保存的密码。"}
+          {storage === "file" && "系统钥匙串不可用，加密主密钥保存在数据目录的本地文件中（仅当前用户可读）。"}
+          {storage === "error" && "无法读取加密主密钥，请解锁系统钥匙串并允许 iShell 访问。"}
+        </small>
+      </span>
+      <strong>{storage === "keychain" ? "系统钥匙串" : storage === "file" ? "本地文件" : "不可用"}</strong>
+    </div>
+  );
 }

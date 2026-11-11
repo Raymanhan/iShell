@@ -24,8 +24,6 @@ import {
   mergeModelSources,
   emptyConversation,
   permissionOptions,
-  serverHistory,
-  conversationTitle,
   type AiEntry,
 } from "../features/ai/types";
 import type { ShellTab } from "../features/shell/types";
@@ -254,7 +252,7 @@ export function AiPanel({
   const [scrolled, setScrolled] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [deleteId, setDeleteId] = useState<string | null>(null);
-  const history = serverHistory(ai.history, tab.serverId);
+  const history = ai.historyFor(tab.serverId);
   const [editing, setEditing] = useState<"model" | "effort" | null>(null);
   const [manualDraft, setManualDraft] = useState("");
   const [manualError, setManualError] = useState("");
@@ -441,27 +439,23 @@ export function AiPanel({
                   }
                   disabled={ai.deletingIds.includes(item.id)}
                   onClick={() => {
-                    ai.selectHistory(tab, item.id);
+                    void ai.selectHistory(tab, item.id);
                     setHistoryOpen(false);
                     setDeleteId(null);
                   }}
                 >
-                  <strong>{conversationTitle(item)}</strong>
+                  <strong>{item.title || "新对话"}</strong>
                   <span>
                     {new Date(item.updatedAt).toLocaleString()} ·{" "}
-                    {item.requestId
-                      ? "执行中"
-                      : `${item.entries.filter((entry) => entry.kind === "user").length} 条消息`}
+                    {item.running ? "执行中" : `${item.messageCount} 条消息`}
                   </span>
                 </button>
                 <button
                   type="button"
                   className="ai-icon"
-                  title={item.requestId ? "请先停止任务再删除" : "删除历史记录"}
-                  aria-label={`删除历史记录：${conversationTitle(item)}`}
-                  disabled={
-                    Boolean(item.requestId) || ai.deletingIds.includes(item.id)
-                  }
+                  title={item.running ? "请先停止任务再删除" : "删除历史记录"}
+                  aria-label={`删除历史记录：${item.title || "新对话"}`}
+                  disabled={item.running || ai.deletingIds.includes(item.id)}
                   onClick={() => setDeleteId(item.id)}
                 >
                   <Trash2 size={14} />

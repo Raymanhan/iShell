@@ -30,8 +30,12 @@ Available packages:
   per-host colors.
 - **Persistent ordering**: connection order and folder placement are stored in
   the local database.
-- **Secure secrets**: passwords are stored through the OS keychain/secret store,
-  not as plain text in exported connection files.
+- **Secure secrets**: passwords, the AI API key and AI conversations are
+  encrypted (AES-256-GCM) in the local database. The encryption key is kept in
+  the OS credential store (macOS Keychain, Windows Credential Manager, Secret
+  Service on Linux) and falls back to a private key file where none is
+  available. Passwords are never written as plain text to exported connection
+  files.
 - **Import and export**: export selected hosts or folders as JSON/ZIP, with
   optional passphrase-protected secrets.
 - **Interactive terminals**: xterm-powered tabs backed by real PTY sessions,
@@ -264,8 +268,10 @@ own 16-color terminal palette.
 - Rust stable toolchain
 - Tauri system dependencies for your platform
 - OpenSSH on macOS and Linux
-- Linux runtime secret storage requires a Secret Service provider such as GNOME
-  Keyring or KWallet.
+- On Linux a Secret Service provider such as GNOME Keyring or KWallet is used
+  when present. Without one the encryption key is stored in a `secret.key` file
+  (mode 0600) in the app data directory; **Settings → About and Updates** shows
+  which is in use. Set `ISHELL_SECRET_STORAGE=file` to always use the file.
 
 On Linux, install the WebKitGTK and bundling dependencies required by Tauri:
 

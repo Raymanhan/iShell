@@ -25,7 +25,7 @@ iShell 是一个基于 Tauri + React + Rust 的轻量级 SSH 桌面工作台，�
 
 - **SSH 连接管理**：以文件夹树组织连接，支持搜索、标签、备注和主机颜色。
 - **连接顺序持久化**：连接排序和所在分组会保存到本地数据库，重启后保持不变。
-- **安全保存密钥信息**：密码通过操作系统钥匙串/Secret Store 保存，不会明文写入导出的连接文件。
+- **安全保存密钥信息**：密码、AI 密钥和 AI 对话以 AES-256-GCM 加密保存在本地数据库；加密主密钥存放在系统凭据库（macOS 钥匙串、Windows 凭据管理器、Linux Secret Service），没有可用凭据库时回退为仅当前用户可读的密钥文件。密码不会明文写入导出的连接文件。
 - **导入/导出连接**：可导出选中的主机或文件夹为 JSON/ZIP，也可选择用口令加密导出密码。
 - **交互式终端**：基于 xterm 的真实 PTY 会话，支持重连、复制标签页、标签排序、跨窗口交接、命令历史和终端内搜索。
 - **分屏与广播输入**：一个标签最多分成 4 个窗格，可左右、上下嵌套分屏；广播输入可把键入内容同步发送到多个会话。
@@ -198,7 +198,7 @@ iShell 是一个基于 Tauri + React + Rust 的轻量级 SSH 桌面工作台，�
 - Rust stable 工具链
 - 对应平台的 Tauri 系统依赖
 - macOS 和 Linux 需要 OpenSSH
-- Linux 运行时保存密码需要 Secret Service，例如 GNOME Keyring 或 KWallet。
+- Linux 上如有 Secret Service（例如 GNOME Keyring 或 KWallet）会用它保存加密主密钥；没有时主密钥保存在应用数据目录的 `secret.key`（权限 0600）。**设置 → 关于与更新** 会显示当前使用的方式；设置环境变量 `ISHELL_SECRET_STORAGE=file` 可强制使用文件。
 
 Linux 下安装 Tauri 所需 WebKitGTK 和打包依赖：
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createConversation, defaultAiConfig, restoreConversation, serverHistory, conversationTitle, applyAiEvent } from '../src/features/ai/types.ts';
+import { createConversation, defaultAiConfig, restoreConversation, serverHistory, conversationTitle, applyAiEvent, historyItems } from '../src/features/ai/types.ts';
 
 test('new conversations have independent identities and histories are isolated by server', () => {
   const a = createConversation(defaultAiConfig, 'a');
@@ -45,4 +45,24 @@ test('completed history restores without interruption notices and keeps compacte
   assert.equal(restored.entries.length, 1);
   assert.equal(restored.entries[0].text, '可见历史');
   assert.equal(restored.messages[0].content, '压缩摘要');
+});
+
+test('history lists saved summaries without their bodies and prefers conversations open in memory', () => {
+  const summaries = {
+    old: { id: 'old', serverId: 'a', title: '旧任务', messageCount: 3, createdAt: 1, updatedAt: 10 },
+    open: { id: 'open', serverId: 'a', title: '保存时的标题', messageCount: 1, createdAt: 2, updatedAt: 20 },
+    other: { id: 'other', serverId: 'b', title: '别的服务器', messageCount: 1, createdAt: 3, updatedAt: 30 },
+  };
+  const open = { ...createConversation(defaultAiConfig, 'a'), id: 'open', createdAt: 2, updatedAt: 40, requestId: 'r' };
+  open.entries.push({ id: 'u1', kind: 'user', text: '部署' }, { id: 'u2', kind: 'user', text: '继续' });
+  const draft = createConversation(defaultAiConfig, 'a');
+
+  const items = historyItems(summaries, { open, [draft.id]: draft }, 'a');
+  assert.deepEqual(items.map(item => item.id), ['open', 'old']);
+  assert.deepEqual(
+    { title: items[0].title, messageCount: items[0].messageCount, running: items[0].running },
+    { title: '部署', messageCount: 2, running: true },
+  );
+  assert.deepEqual({ title: items[1].title, running: items[1].running }, { title: '旧任务', running: false });
+  assert.deepEqual(historyItems(summaries, {}, 'b').map(item => item.id), ['other']);
 });
