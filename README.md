@@ -139,6 +139,7 @@ connections, secret export is optional and can be passphrase-protected.
   editing; multi-line snippets are sent line by line.
 - Click a snippet to send it to the focused pane, or to every broadcast session
   while broadcasting.
+- Snippets can contain variables, `{{name}}` or `{{name:default}}`, e.g. `docker logs --tail {{lines:200}} {{container}}`. Sending one opens a small form to fill them in, with a preview of the final command; each name is asked once, and values cannot contain line breaks.
 - Snippets are stored in the local database.
 
 ### Port Forwarding

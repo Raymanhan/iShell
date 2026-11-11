@@ -2731,3 +2731,22 @@ button.detail-row:hover {
   padding-right: 30px;
   background-position: right 17px center, right 12px center !important;
 }
+
+.snippet-fill label {
+  display: grid;
+  grid-template-columns: minmax(48px, auto) 1fr;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.snippet-fill .snippet-preview {
+  display: block;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  color: var(--text);
+  font: 12px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
