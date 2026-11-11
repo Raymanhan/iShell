@@ -226,6 +226,12 @@ The status panel samples remote host information through SSH:
 3. Open the sidebar’s **history icon** to view, continue, or delete conversations for the current server. **+** starts an independent conversation and preserves previous records. Running tasks remain accessible through history and must be stopped before deletion. Model, effort, and permission controls remain editable during execution; changes apply to the next send, while the current task keeps its starting settings.
 4. Describe a deployment or operations task. The agent can run Shell commands, read/write files, and execute generated Python, Shell, or Node.js code. Every step exposes its command/code, output, and exit status. The server needs Python 3; JavaScript also needs Node.js. Non-interactive elevation uses existing `sudo -n` privileges.
 
+**AI in the terminal:**
+
+- Select terminal output and press `⌘⇧A` (macOS) or `Ctrl+Shift+A` (Windows/Linux): the AI sidebar opens with the selection quoted in the input, ready to ask what went wrong.
+- Type `# what you want` at the prompt (for example `# show the process listening on 8080`) and press `⌘↩` or `Ctrl+Enter`: the line is replaced with a generated command that is **typed in, never run**; press Enter yourself once it looks right. The last 40 lines of terminal output are used as context.
+- AI tasks can call the `read_terminal` tool to read the terminal's recent output (read-only, still subject to the permission mode), e.g. when you say "look at that error".
+
 Choose permissions below the composer, or set the default for new chats in settings:
 
 | Mode | Behavior |
