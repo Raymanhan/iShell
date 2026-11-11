@@ -53,6 +53,8 @@ export interface ChatInput {
   permission: string;
   cwd: string | null;
   messages: Record<string, unknown>[];
+  /** Other servers the task may operate on, each through its open terminal. */
+  targets?: { serverId: string; sessionId: string }[];
 }
 
 export interface ChatResult {

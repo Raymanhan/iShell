@@ -58,6 +58,58 @@ function CopyButton({ text }: { text: string }) {
     </button>
   );
 }
+/** Other servers the conversation may operate on, besides its own. */
+function TargetPicker({
+  targets,
+  otherServers,
+  disabled,
+  onChange,
+}: {
+  targets: string[];
+  otherServers: { id: string; name: string }[];
+  disabled: boolean;
+  onChange: (targets: string[]) => void;
+}) {
+  if (!targets.length && !otherServers.length) return null;
+  const nameOf = (id: string) => otherServers.find((server) => server.id === id)?.name;
+  const addable = otherServers.filter((server) => !targets.includes(server.id));
+  return (
+    <div className="ai-targets" aria-label="同时操作的服务器">
+      <span>同时操作</span>
+      {targets.map((id) => (
+        <span key={id} className={`ai-target-chip ${nameOf(id) ? "" : "offline"}`}>
+          {nameOf(id) ?? "未连接的服务器"}
+          <button
+            type="button"
+            aria-label={`不再操作 ${nameOf(id) ?? "该服务器"}`}
+            disabled={disabled}
+            onClick={() => onChange(targets.filter((item) => item !== id))}
+          >
+            <X size={11} />
+          </button>
+        </span>
+      ))}
+      {addable.length > 0 && (
+        <select
+          value=""
+          disabled={disabled}
+          aria-label="添加服务器"
+          onChange={(event) => {
+            if (event.target.value) onChange([...targets, event.target.value]);
+          }}
+        >
+          <option value="">＋ 添加已连接的服务器</option>
+          {addable.map((server) => (
+            <option key={server.id} value={server.id}>
+              {server.name}
+            </option>
+          ))}
+        </select>
+      )}
+    </div>
+  );
+}
+
 function ToolCard({
   entry,
   target,
@@ -141,7 +193,11 @@ function ToolCard({
       </div>
       {entry.approvalPending && (
         <div className="ai-approval">
-          <p>目标：{target}。请检查命令、代码和路径。</p>
+          <p>
+            目标：{entry.servers?.length ? entry.servers.join("、") : target}
+            {entry.servers && entry.servers.length > 1 ? `（共 ${entry.servers.length} 台，将并行执行）` : ""}
+            。请检查命令、代码和路径。
+          </p>
           <div>
             <button
               type="button"
@@ -165,6 +221,21 @@ function ToolCard({
           {entry.approvalError}
         </div>
       )}
+      {result?.results?.map((item) => {
+        const itemFailed = Boolean(item.error) || (item.exitCode != null && item.exitCode !== 0);
+        return (
+          <div key={item.server} className={`ai-tool-server ${itemFailed ? "failed" : ""}`}>
+            <div className="ai-tool-path">
+              {item.server} ·{" "}
+              {item.status !== "done" ? "执行中" : itemFailed ? "失败" : "完成"}
+              {item.exitCode != null ? ` · ${item.exitCode}` : ""}
+            </div>
+            {item.stdout && <pre className="ai-tool-output">{item.stdout}</pre>}
+            {item.stderr && <pre className="ai-tool-output ai-stderr">{item.stderr}</pre>}
+            {item.error && <div className="ai-error">{item.error}</div>}
+          </div>
+        );
+      })}
       {result?.stdout && <pre className="ai-tool-output">{result.stdout}</pre>}
       {result?.stderr && (
         <pre className="ai-tool-output ai-stderr">{result.stderr}</pre>
@@ -234,11 +305,14 @@ const Message = memo(function Message({
 export function AiPanel({
   tab,
   ai,
+  otherServers = [],
   onSettings,
   onClose,
 }: {
   tab: ShellTab;
   ai: AiController;
+  /** Other servers with a connected terminal, which a task can also use. */
+  otherServers?: { id: string; name: string }[];
   onSettings: () => void;
   onClose: () => void;
 }) {
@@ -407,6 +481,12 @@ export function AiPanel({
         <strong>{tab.title}</strong>
         <span>{tab.host}</span>
       </div>
+      <TargetPicker
+        targets={conversation.targets ?? []}
+        otherServers={otherServers}
+        disabled={busy || !conversation.id}
+        onChange={(targets) => ai.update(tab.id, (value) => ({ ...value, targets }))}
+      />
       {historyOpen && (
         <div className="ai-history" role="dialog" aria-label="AI 历史记录列表">
           <header>

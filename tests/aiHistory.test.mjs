@@ -66,3 +66,18 @@ test('history lists saved summaries without their bodies and prefers conversatio
   assert.deepEqual({ title: items[1].title, running: items[1].running }, { title: '旧任务', running: false });
   assert.deepEqual(historyItems(summaries, {}, 'b').map(item => item.id), ['other']);
 });
+
+test('targets need a connected terminal and never include the primary server', async () => {
+  const { resolveTargets } = await import('../src/features/ai/types.ts');
+  const tabs = [
+    { serverId: 'a', sessionId: 's-a', state: 'connected' },
+    { serverId: 'b', sessionId: 's-b1', state: 'closed' },
+    { serverId: 'b', sessionId: 's-b2', state: 'connected' },
+    { serverId: 'c', sessionId: null, state: 'connecting' },
+  ];
+  assert.deepEqual(resolveTargets(['a', 'b', 'c', 'b', 'gone'], 'a', tabs), {
+    sessions: [{ serverId: 'b', sessionId: 's-b2' }],
+    missing: ['c', 'gone'],
+  });
+  assert.deepEqual(resolveTargets(undefined, 'a', tabs), { sessions: [], missing: [] });
+});

@@ -588,6 +588,83 @@ fn terminal_session(app: &AppHandle, id: &str) {
     terminal::close_terminal(&registry, &session);
 }
 
+/// One AI tool call fanned out to several servers, through the same path an
+/// AI task uses: each result must come from its own server, and a server
+/// whose terminal is gone fails alone.
+fn ai_fanout(app: &AppHandle, ids: &[&str]) {
+    use crate::{ai::targets, terminal};
+    use tauri::ipc::Channel;
+
+    let registry = Arc::new(terminal::TerminalRegistry::default());
+    let mut hosts = Vec::new();
+    for id in ids {
+        let session =
+            terminal::open_terminal(app.clone(), &registry, id.to_string(), None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !registry.connected_to(&session, id) {
+            assert!(Instant::now() < deadline, "{id} never connected");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        hosts.push(targets::Host {
+            label: id.to_string(),
+            server: store::get_server(app, id).unwrap(),
+            session,
+        });
+    }
+    // The last host's terminal goes away before the call.
+    let closed = hosts.last().unwrap().session.clone();
+    terminal::close_terminal(&registry, &closed);
+
+    let updates = Arc::new(Mutex::new(0));
+    let counter = updates.clone();
+    let events = Channel::new(move |_| {
+        *counter.lock().unwrap() += 1;
+        Ok(())
+    });
+    let chosen: Vec<&targets::Host> = hosts.iter().collect();
+    let result = targets::run(
+        app,
+        &registry,
+        &Arc::new(AtomicBool::new(false)),
+        &events,
+        "tool-1",
+        "shell",
+        &serde_json::json!({"command": "printf '%s' \"${SSH_CONNECTION##* }\""}),
+        &chosen,
+    )
+    .unwrap();
+
+    let results = result["results"].as_array().unwrap();
+    assert_eq!(results.len(), ids.len());
+    let port = |i: usize| results[i]["stdout"].as_str().unwrap().to_string();
+    for (i, host) in hosts.iter().enumerate().take(ids.len() - 1) {
+        assert_eq!(results[i]["server"], host.label);
+        assert_eq!(results[i]["exitCode"], 0, "{}", results[i]);
+        assert_eq!(
+            port(i),
+            host.server.port.to_string(),
+            "ran on its own server"
+        );
+    }
+    let last = &results[ids.len() - 1];
+    assert!(
+        last["error"].as_str().unwrap().contains("连接已关闭"),
+        "{last}"
+    );
+    assert_eq!(result["exitCode"], 1);
+    assert!(result["error"]
+        .as_str()
+        .unwrap()
+        .contains(ids[ids.len() - 1]));
+    assert!(
+        *updates.lock().unwrap() > 0,
+        "combined progress was reported"
+    );
+    for host in &hosts {
+        terminal::close_terminal(&registry, &host.session);
+    }
+}
+
 #[test]
 fn live_ssh_end_to_end() {
     let Some(live) = live() else {
@@ -681,6 +758,11 @@ fn live_ssh_end_to_end() {
         store::upsert_server(&app, &plain, None).unwrap();
         assert!(!ssh::sftp_available_for_tests(&app, "live-no-sftp"));
         file_panel(&app, "live-no-sftp", &base, true);
+    }
+
+    if std::env::var("ISHELL_LIVE_NO_SFTP_PORT").is_ok() {
+        eprintln!("-- AI tool call on several servers");
+        ai_fanout(&app, &["live-key", "live-no-sftp", "live-password"]);
     }
 
     if let Ok(user) = std::env::var("ISHELL_LIVE_SFTP_ONLY_USER") {

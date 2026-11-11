@@ -492,6 +492,18 @@ export default function App() {
     }
   }
 
+  /** Servers with a connected terminal, other than `serverId`, once each. */
+  function connectedServersExcept(serverId: string) {
+    const seen = new Set<string>([serverId]);
+    const servers: { id: string; name: string }[] = [];
+    for (const item of tabs) {
+      if (item.state !== "connected" || !item.sessionId || seen.has(item.serverId)) continue;
+      seen.add(item.serverId);
+      servers.push({ id: item.serverId, name: item.title });
+    }
+    return servers;
+  }
+
   /** Open the AI panel on this tab with the selection quoted in the draft. */
   function askAiAbout(tab: ShellTab, selection: string) {
     setActiveTabId(tab.id);
@@ -1854,6 +1866,7 @@ export default function App() {
                     {sidePanel === "ai" && (
                       <Suspense fallback={<div className="ai-notice">正在加载 AI 助手…</div>}>
                         <AiPanel tab={activeTab} ai={ai}
+                          otherServers={connectedServersExcept(activeTab.serverId)}
                           onSettings={() => { setSettingsPage("ai"); setSettingsOpen(true); }}
                           onClose={() => setSidePanel(null)} />
                       </Suspense>

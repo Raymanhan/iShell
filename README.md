@@ -232,6 +232,8 @@ The status panel samples remote host information through SSH:
 - Type `# what you want` at the prompt (for example `# show the process listening on 8080`) and press `⌘↩` or `Ctrl+Enter`: the line is replaced with a generated command that is **typed in, never run**; press Enter yourself once it looks right. The last 40 lines of terminal output are used as context.
 - AI tasks can call the `read_terminal` tool to read the terminal's recent output (read-only, still subject to the permission mode), e.g. when you say "look at that error".
 
+**Several servers:** under the server name in the AI sidebar, **同时操作** adds other servers that have an open, connected terminal. Every AI tool can then name the servers to run on; the same command, code or file runs on several servers **in parallel**, with results shown per server, and one server failing does not stop the others. Approval cards list every target, and each server takes part in at most one AI task at a time.
+
 Choose permissions below the composer, or set the default for new chats in settings:
 
 | Mode | Behavior |

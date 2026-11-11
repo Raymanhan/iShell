@@ -8,6 +8,7 @@ import {
   defaultAiConfig,
   createConversation,
   restoreConversation,
+  resolveTargets,
   historyItems,
   modelSelection,
   mergeModelSources,
@@ -357,6 +358,11 @@ export function useAi(tabs: ShellTab[]) {
       }));
       return;
     }
+    const { sessions: targets, missing } = resolveTargets(
+      conversation.targets,
+      tab.serverId,
+      tabs,
+    );
     const requestId = crypto.randomUUID();
     const messages = [
       ...conversation.messages,
@@ -376,6 +382,15 @@ export function useAi(tabs: ShellTab[]) {
       entries: [
         ...value.entries,
         { id: crypto.randomUUID(), kind: "user", text },
+        ...(missing.length
+          ? [
+              {
+                id: crypto.randomUUID(),
+                kind: "notice" as const,
+                text: `${missing.length} 台已选服务器没有已连接的终端，本次不包含它们。`,
+              },
+            ]
+          : []),
       ],
     }));
     void flushHistory();
@@ -433,6 +448,7 @@ export function useAi(tabs: ShellTab[]) {
           permission: conversation.permission,
           cwd: currentDirForTab(tab),
           messages,
+          targets,
         },
         onEvent,
       });

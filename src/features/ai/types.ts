@@ -117,6 +117,8 @@ export function modelSelection(
   };
 }
 export interface ToolResult {
+  /** One per server, when the call ran on several. */
+  results?: (ToolResult & { server: string })[];
   status?: string;
   stdout?: string;
   stderr?: string;
@@ -136,6 +138,8 @@ export interface AiEntry {
   running?: boolean;
   risk?: AiRisk;
   approvalId?: string;
+  /** The servers a tool call runs on, when the task spans several. */
+  servers?: string[];
   approvalPending?: boolean;
   approvalBusy?: boolean;
   approvalError?: string;
@@ -159,6 +163,8 @@ export interface AiConversation {
   requestId: string | null;
   stopping: boolean;
   sessionId: string | null;
+  /** Other servers this conversation may operate on, by server id. */
+  targets?: string[];
 }
 export interface AiEvent {
   type:
@@ -180,6 +186,7 @@ export interface AiEvent {
   result?: ToolResult;
   risk?: AiRisk;
   approvalId?: string;
+  servers?: string[];
   beforeTokens?: number;
   afterTokens?: number;
 }
@@ -262,6 +269,7 @@ export function applyAiEvent(
         ? {
             ...entry,
             risk: event.risk,
+            ...(event.servers?.length ? { servers: event.servers } : {}),
             ...(event.type === "approval"
               ? {
                   approvalId: event.approvalId,
@@ -386,4 +394,27 @@ export function restoreConversation(saved: AiConversation): AiConversation {
         : []),
     ],
   };
+}
+
+/**
+ * The other servers a send can include: each needs a connected terminal,
+ * which the task runs its tools through. Servers without one are listed in
+ * `missing` and left out of this send.
+ */
+export function resolveTargets(
+  targets: readonly string[] | undefined,
+  primaryServerId: string,
+  tabs: readonly { serverId: string; sessionId: string | null; state: string }[],
+): { sessions: { serverId: string; sessionId: string }[]; missing: string[] } {
+  const sessions: { serverId: string; sessionId: string }[] = [];
+  const missing: string[] = [];
+  for (const serverId of new Set(targets ?? [])) {
+    if (serverId === primaryServerId) continue;
+    const tab = tabs.find(
+      (item) => item.serverId === serverId && item.state === "connected" && item.sessionId,
+    );
+    if (tab?.sessionId) sessions.push({ serverId, sessionId: tab.sessionId });
+    else missing.push(serverId);
+  }
+  return { sessions, missing };
 }
