@@ -6,7 +6,7 @@ import {
   type MouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { Activity, Check, Clock3, Columns2, Copy, FolderTree, Languages, Network, PanelLeft, PanelsTopLeft, Plus, Radio, RefreshCw, Rows2, Settings, Sparkles, SquareCode, X } from "lucide-react";
+import { Activity, Check, Clock3, Columns2, Copy, FolderTree, Languages, Network, PanelLeft, PanelsTopLeft, Plus, Radio, RefreshCw, Rows2, Settings, Sparkles, SquareCode, SquareTerminal, X } from "lucide-react";
 import { TERMINAL_ENCODINGS } from "../features/shell/encodings";
 import { manageNativeDragGhost } from "../features/shell/nativeDragGhost";
 import { MAX_PANES, splitShortcutLabel, type SplitDirection } from "../features/shell/panes";
@@ -34,6 +34,7 @@ export function TabBar({
   autoHide,
   connectionsOpen,
   onNewServer,
+  onOpenLocal,
   tabs,
   activeTabId,
   activeTabTitle,
@@ -60,6 +61,7 @@ export function TabBar({
   autoHide: boolean;
   connectionsOpen: boolean;
   onNewServer: () => void;
+  onOpenLocal: () => void;
   tabs: ShellTab[];
   activeTabId: string | null;
   activeTabTitle: string | null;
@@ -462,6 +464,15 @@ export function TabBar({
             <Plus size={16} />
           </button>
         )}
+        <button
+          type="button"
+          className="icon-button topbar-new"
+          onClick={onOpenLocal}
+          title="本地终端"
+          aria-label="打开本地终端"
+        >
+          <SquareTerminal size={15} />
+        </button>
       </div>
 
       <div

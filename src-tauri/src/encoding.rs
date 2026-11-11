@@ -65,8 +65,17 @@ mod tests {
         assert!(normalize("klingon").is_err());
         // The names the frontend offers (src/features/shell/encodings.ts).
         for name in [
-            "UTF-8", "GBK", "gb18030", "Big5", "Shift_JIS", "EUC-JP", "EUC-KR",
-            "windows-1252", "ISO-8859-2", "windows-1251", "KOI8-R",
+            "UTF-8",
+            "GBK",
+            "gb18030",
+            "Big5",
+            "Shift_JIS",
+            "EUC-JP",
+            "EUC-KR",
+            "windows-1252",
+            "ISO-8859-2",
+            "windows-1251",
+            "KOI8-R",
         ] {
             assert_eq!(normalize(name).unwrap(), name);
         }

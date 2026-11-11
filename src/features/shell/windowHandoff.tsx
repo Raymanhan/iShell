@@ -105,6 +105,7 @@ export function normalizeHandedOffTab(tab: Partial<ShellTab>) {
     host: tab.host,
     color: tab.color,
     sessionId: tab.sessionId,
+    encoding: typeof tab.encoding === "string" ? tab.encoding : undefined,
     state: tab.state === "closed" || tab.state === "connecting" ? tab.state : "connected",
     status: tab.status ?? null,
     networkSample: tab.networkSample ?? null,

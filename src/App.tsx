@@ -8,6 +8,7 @@ import {
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { command, ErrorCode, hasErrorCode, isTauri } from "./api/tauri";
@@ -90,6 +91,11 @@ import type {
   TailViewerConfig,
 } from "./types";
 import { encodingLabel } from "./features/shell/encodings";
+import { LOCAL_SERVER, isLocalServerId } from "./features/shell/local";
+import { CommandPalette } from "./components/CommandPalette";
+import { isPaletteShortcut } from "./features/palette/match";
+import { paletteItems } from "./features/palette/items";
+import { snippetVariables } from "./features/snippets/variables";
 import { startPointerDrag } from "./utils/pointerDrag";
 import { waitAtLeast, waitForNextPaint } from "./utils/timing";
 
@@ -126,6 +132,9 @@ export default function App() {
   const [connectionsOpen, setConnectionsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsPage, setSettingsPage] = useState<"appearance" | "ai">("appearance");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  // A snippet with variables picked in the palette, for the snippets panel to fill in.
+  const [snippetFillRequest, setSnippetFillRequest] = useState<{ snippetId: string; id: number } | null>(null);
   const {
     theme,
     setTheme,
@@ -202,6 +211,7 @@ export default function App() {
     () => tabs.find((tab) => tab.id === activeTabId) ?? null,
     [activeTabId, tabs],
   );
+  const activeIsLocal = isLocalServerId(activeTab?.serverId);
   // The tab bar shows one tab per pane group; `activeTabId` is the focused pane.
   const activeGroupId = activeTabId ? groupIdOf(paneLayouts, activeTabId) : null;
   const barTabs = useMemo(() => {
@@ -223,6 +233,20 @@ export default function App() {
   enqueueUploadsRef.current = enqueueUploads;
   statusOpenRef.current = statusOpen;
   tabsRef.current = tabs;
+
+  // The command palette opens from anywhere, the terminal included: the
+  // listener runs in the capture phase, before xterm sees the key.
+  useEffect(() => {
+    const mac = /mac/i.test(navigator.platform) || /mac os/i.test(navigator.userAgent);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!isPaletteShortcut(event, mac)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setPaletteOpen((open) => !open);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, []);
   activeTabIdRef.current = activeTabId;
   paneLayoutsRef.current = paneLayouts;
   broadcastTargetsRef.current = broadcastTargets;
@@ -402,7 +426,7 @@ export default function App() {
 
   // Lazy-load files when the dock opens / status when its side panel opens.
   useEffect(() => {
-    if (!activeTab) return;
+    if (!activeTab || isLocalServerId(activeTab.serverId)) return;
     if (filesOpen && activeTab.files.length === 0) {
       loadFilesFor(activeTab.id, activeTab.serverId, "/", 0);
     }
@@ -469,6 +493,16 @@ export default function App() {
     setSidePanel((current) => (current === panel ? null : panel));
   }
 
+  /** From the palette: send now, or ask for the values of its variables first. */
+  function runSnippet(snippet: Snippet) {
+    if (snippetVariables(snippet.command).length === 0) {
+      sendSnippet(snippet);
+      return;
+    }
+    setSidePanel("snippets");
+    setSnippetFillRequest({ snippetId: snippet.id, id: Date.now() + Math.random() });
+  }
+
   function sendSnippet(snippet: Snippet) {
     if (!activeTab) return;
     setPasteRequest({ tabId: activeTab.id, id: Date.now() + Math.random(), command: snippetInput(snippet) });
@@ -499,6 +533,7 @@ export default function App() {
     const servers: { id: string; name: string }[] = [];
     for (const item of tabs) {
       if (item.state !== "connected" || !item.sessionId || seen.has(item.serverId)) continue;
+      if (isLocalServerId(item.serverId)) continue;
       seen.add(item.serverId);
       servers.push({ id: item.serverId, name: item.title });
     }
@@ -536,6 +571,7 @@ export default function App() {
   // Auto-refresh live monitoring every second; disk mounts stay on a slower cadence.
   useEffect(() => {
     if (!statusOpen || !activeTab || activeTab.state !== "connected") return;
+    if (isLocalServerId(activeTab.serverId)) return;
     const tabId = activeTab.id;
     const serverId = activeTab.serverId;
     if (isTauri) {
@@ -620,6 +656,12 @@ export default function App() {
     }, remaining);
   }
 
+  /** A tab's server: a saved one, or the stand-in for local terminals. */
+  function serverOf(serverId: string | null | undefined): ServerRecord | undefined {
+    if (isLocalServerId(serverId)) return LOCAL_SERVER;
+    return serversRef.current.find((item) => item.id === serverId);
+  }
+
   /** Open a terminal to `server` in a new tab, or in a new pane beside `split.paneId`. */
   async function openShell(
     server: ServerRecord | null = connections.selectedServer,
@@ -634,9 +676,9 @@ export default function App() {
       id: tabId,
       serverId: server.id,
       title: server.name,
-      subtitle: `${server.username}@${server.host}:${server.port}${
-        jumpName ? ` · 经 ${jumpName}` : ""
-      }`,
+      subtitle: isLocalServerId(server.id)
+        ? "本机 Shell"
+        : `${server.username}@${server.host}:${server.port}${jumpName ? ` · 经 ${jumpName}` : ""}`,
       host: server.host,
       color: server.color,
       sessionId: null,
@@ -699,7 +741,7 @@ export default function App() {
       return;
     }
     const source = tabsRef.current.find((tab) => tab.id === paneId);
-    const target = server ?? serversRef.current.find((item) => item.id === source?.serverId);
+    const target = server ?? serverOf(source?.serverId);
     if (!target) return;
     void openShell(target, { paneId, direction });
   }
@@ -771,7 +813,7 @@ export default function App() {
 
     terminalReadyTabs.current.delete(tabId);
     // A new session starts with the server's encoding again.
-    const server = serversRef.current.find((item) => item.id === tab.serverId);
+    const server = serverOf(tab.serverId);
     patchTab(tabId, { sessionId: null, state: "connecting", encoding: server?.encoding ?? tab.encoding });
     showNotice(`正在重新连接 ${tab.title}…`);
 
@@ -779,7 +821,7 @@ export default function App() {
       if (isTauri && tab.sessionId) {
         await command("close_terminal", { sessionId: tab.sessionId }).catch(() => undefined);
       }
-      if (isTauri) {
+      if (isTauri && !isLocalServerId(tab.serverId)) {
         await command("invalidate_connection", { id: tab.serverId }).catch(() => undefined);
       }
       if (!isTauri) {
@@ -817,7 +859,7 @@ export default function App() {
 
   function cloneShell(tabId: string) {
     const tab = tabs.find((item) => item.id === tabId);
-    const server = tab ? connections.servers.find((item) => item.id === tab.serverId) : null;
+    const server = serverOf(tab?.serverId);
     if (server) void openShell(server);
   }
 
@@ -927,6 +969,7 @@ export default function App() {
     terminalReadyTabs.current.add(tabId);
     patchTab(tabId, { state: "connected" });
     showNotice(`${title} 已连接`);
+    if (isLocalServerId(serverId)) return;
     portForwards.autoStart(serverId);
     connections.refreshServers();
     refreshSftpAfterTerminalReady(tabId, serverId);
@@ -1699,6 +1742,7 @@ export default function App() {
           onToggleSidePanel={toggleSidePanel}
           onActivate={activateGroup}
           onClone={(groupId) => cloneShell(focusedPaneOf(groupId))}
+          onOpenLocal={() => void openShell(LOCAL_SERVER)}
           onReconnect={(groupId) => paneIdsOf(paneLayoutsRef.current, groupId).forEach((id) => void reconnectShell(id))}
           onSetEncoding={(groupId, encoding) => void setTabEncoding(groupId, encoding)}
           onDetach={detachShell}
@@ -1769,9 +1813,9 @@ export default function App() {
                             setNotice={showNotice}
                             onReady={() => handleTerminalReady(tab.id, tab.serverId, tab.title)}
                             onCommandSubmitted={(commandText) => commandHistory.record(tab.serverId, commandText)}
-                            onOpenDirectory={(path) => void openTerminalDirectory(tab.id, path)}
-                            onAskAi={(selection) => askAiAbout(tab, selection)}
-                            onSuggestCommand={(request) => ai.suggestCommand(tab, request)}
+                            onOpenDirectory={isLocalServerId(tab.serverId) ? undefined : (path) => void openTerminalDirectory(tab.id, path)}
+                            onAskAi={isLocalServerId(tab.serverId) ? undefined : (selection) => askAiAbout(tab, selection)}
+                            onSuggestCommand={isLocalServerId(tab.serverId) ? undefined : (request) => ai.suggestCommand(tab, request)}
                             pasteRequest={pasteRequest?.tabId === tab.id ? pasteRequest : null}
                             commandRequest={commandRequest?.tabId === tab.id ? commandRequest : null}
                             commandHistory={commandHistory.forServer(tab.serverId)}
@@ -1821,6 +1865,11 @@ export default function App() {
                       ref={filesRegionRef}
                       style={{ "--files-panel-height": `${filesRatio * 100}%` } as CSSProperties}
                     >
+                      {activeIsLocal ? (
+                        <LocalOnlyNotice onClose={() => setFilesOpen(false)}>
+                          文件面板用于远程服务器。本地终端中的文件可直接在本机文件管理器中打开。
+                        </LocalOnlyNotice>
+                      ) : (
                       <Suspense fallback={<div className="column-state">正在打开文件面板…</div>}>
                         <SftpBrowser
                           tab={activeTab}
@@ -1845,6 +1894,7 @@ export default function App() {
                           onClose={() => setFilesOpen(false)}
                         />
                       </Suspense>
+                      )}
                       <div className="transfer-queues">
                         <UploadQueue
                           uploads={uploadQueue.uploads}
@@ -1884,10 +1934,19 @@ export default function App() {
                     key={sidePanel}
                     className={`status-panel-content ${statusOpen ? "status-view" : "history-view"}`}
                   >
-                    {sidePanel === "status" && (
+                    {activeIsLocal && (sidePanel === "status" || sidePanel === "ai" || sidePanel === "forwards") && (
+                      <LocalOnlyNotice onClose={() => setSidePanel(null)}>
+                        {sidePanel === "status"
+                          ? "监控面板用于远程服务器。"
+                          : sidePanel === "ai"
+                            ? "AI 助手在远程服务器的标签中使用。"
+                            : "端口转发属于远程服务器，请在服务器的标签中管理。"}
+                      </LocalOnlyNotice>
+                    )}
+                    {!activeIsLocal && sidePanel === "status" && (
                       <StatusDashboard tab={activeTab} onHostCopied={(host) => showNotice(`已复制 ${host}`)} />
                     )}
-                    {sidePanel === "ai" && (
+                    {!activeIsLocal && sidePanel === "ai" && (
                       <Suspense fallback={<div className="ai-notice">正在加载 AI 助手…</div>}>
                         <AiPanel tab={activeTab} ai={ai}
                           otherServers={connectedServersExcept(activeTab.serverId)}
@@ -1898,7 +1957,7 @@ export default function App() {
                     {sidePanel === "history" && (
                       <CommandHistoryPanel commands={commandHistory.forServer(activeTab.serverId)} onPick={pasteHistoryCommand} />
                     )}
-                    {sidePanel === "forwards" && (
+                    {!activeIsLocal && sidePanel === "forwards" && (
                       <PortForwardsPanel
                         serverId={activeTab.serverId}
                         serverName={activeTab.title}
@@ -1916,6 +1975,7 @@ export default function App() {
                         snippets={snippets.snippets}
                         broadcasting={broadcastTargets !== null && broadcastTargets.size > 1 && broadcastTargets.has(activeTab.id)}
                         onSend={sendSnippet}
+                        fillRequest={snippetFillRequest}
                         onSave={snippets.save}
                         onDelete={(snippet) => void deleteSnippet(snippet)}
                       />
@@ -1938,6 +1998,41 @@ export default function App() {
           )}
         </div>
       </main>
+
+      {paletteOpen && (
+        <CommandPalette
+          items={paletteItems({
+            servers: connections.servers,
+            tabs: barTabs,
+            activeGroupId,
+            activeTab,
+            snippets: snippets.snippets,
+            broadcasting: broadcastTargets !== null,
+            connect: (server) => void openShell(server),
+            openLocal: () => void openShell(LOCAL_SERVER),
+            activateGroup,
+            newServer: () => {
+              setConnectionsOpen(true);
+              connections.newServer();
+            },
+            openSettings: () => {
+              setSettingsPage("appearance");
+              setSettingsOpen(true);
+            },
+            toggleConnections: () => setConnectionsOpen((open) => !open),
+            toggleFiles: () => setFilesOpen((open) => !open),
+            toggleSidePanel,
+            split: (direction) => activeTabId && splitShell(activeTabId, direction),
+            reconnect: () =>
+              activeGroupId && paneIdsOf(paneLayoutsRef.current, activeGroupId).forEach((id) => void reconnectShell(id)),
+            closeTab: () => activeGroupId && void closeGroups([activeGroupId]),
+            toggleBroadcast,
+            setEncoding: (encoding) => activeGroupId && void setTabEncoding(activeGroupId, encoding),
+            sendSnippet: runSnippet,
+          })}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
 
       {settingsOpen && (
         <SettingsModal
@@ -2044,6 +2139,18 @@ export default function App() {
           onDelete={connections.editor.form.id ? connections.editor.deleteServer : undefined}
         />
       )}
+    </div>
+  );
+}
+
+/** In place of a panel that only applies to remote servers. */
+function LocalOnlyNotice({ children, onClose }: { children: ReactNode; onClose: () => void }) {
+  return (
+    <div className="local-only-notice">
+      <p>{children}</p>
+      <button type="button" className="solid-button" onClick={onClose}>
+        关闭
+      </button>
     </div>
   );
 }

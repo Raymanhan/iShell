@@ -4,6 +4,7 @@ mod encoding;
 mod error;
 #[cfg(test)]
 mod live_tests;
+mod local_shell;
 mod models;
 mod openssh;
 mod pool;

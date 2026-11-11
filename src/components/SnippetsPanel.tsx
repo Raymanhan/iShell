@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { CornerDownLeft, Pencil, Plus, Search, SquareCode, Trash2, Type } from "lucide-react";
 import { fillSnippet, snippetVariables } from "../features/snippets/variables";
 import type { Snippet, SnippetInput } from "../types";
@@ -10,6 +10,7 @@ export function SnippetsPanel({
   snippets,
   broadcasting,
   onSend,
+  fillRequest,
   onSave,
   onDelete,
 }: {
@@ -17,6 +18,8 @@ export function SnippetsPanel({
   /** Broadcast input is on, so a sent snippet reaches every broadcast session. */
   broadcasting: boolean;
   onSend: (snippet: Snippet) => void;
+  /** Ask for this snippet's variables (from the command palette); `id` changes per request. */
+  fillRequest?: { snippetId: string; id: number } | null;
   onSave: (input: SnippetInput) => Promise<unknown>;
   onDelete: (snippet: Snippet) => void;
 }) {
@@ -43,6 +46,13 @@ export function SnippetsPanel({
       error: null,
     });
   }
+
+  useEffect(() => {
+    const snippet = fillRequest && snippets.find((item) => item.id === fillRequest.snippetId);
+    if (snippet) send(snippet);
+    // Only a new request opens the form, not changes to the list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fillRequest?.id]);
 
   function sendFilled(event: FormEvent) {
     event.preventDefault();

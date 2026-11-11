@@ -123,6 +123,30 @@ connections, secret export is optional and can be passphrase-protected.
 - Search the terminal output with `⌘F` (macOS) or `Ctrl+Shift+F`
   (Windows/Linux), with case, whole-word and regex options.
 
+### Local Terminal
+
+Click the terminal icon at the left of the top bar, or choose **打开本地终端**
+in the command palette, to open a shell on this computer in a tab: a login
+shell (`$SHELL -l`) on macOS and Linux, PowerShell on Windows, or whatever
+`ISHELL_LOCAL_SHELL` names. Local tabs split, broadcast, and keep command
+history and snippets like any other; the file panel, monitoring, port
+forwarding and the AI assistant are for remote servers.
+
+### Command Palette
+
+Press `⌘K` or `⇧⌘P` (macOS) or `Ctrl+Shift+P` (Windows/Linux) to open the
+command palette, from the terminal too (`Ctrl+K` stays with the shell). Type
+to fuzzy-search and run:
+
+- Connect to a saved server (by name, address, user, group or tag), or open
+  a local terminal
+- Switch to an open tab
+- Send a snippet (one with variables opens the snippets panel to fill them in)
+- Actions: toggle panels, split, reconnect, broadcast, close the tab, switch
+  the terminal encoding, add a server, open settings
+
+Arrow keys select, Enter runs, Escape closes.
+
 ### Split Panes and Broadcast Input
 
 - Right-click a tab and choose **Split right** or **Split down**, or press

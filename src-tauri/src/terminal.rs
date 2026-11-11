@@ -34,7 +34,7 @@ use tauri::{
 };
 use uuid::Uuid;
 
-use crate::encoding;
+use crate::{encoding, local_shell};
 
 #[cfg(not(russh_backend))]
 use crate::models::ServerRecord;
@@ -160,13 +160,20 @@ impl TerminalRegistry {
         Some(plain_lines(&encoding::decode(encoding, &bytes), lines))
     }
 
-    fn output(&self, session_id: &str, data: &[u8]) {
+    /// Whether the session exists and has not ended.
+    #[cfg(test)]
+    pub(crate) fn is_open(&self, session_id: &str) -> bool {
+        self.with_session(session_id, |session| session.closed.is_none())
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn output(&self, session_id: &str, data: &[u8]) {
         if !data.is_empty() {
             self.with_session(session_id, |session| session.push_output(data));
         }
     }
 
-    fn mark_ready(&self, session_id: &str) {
+    pub(crate) fn mark_ready(&self, session_id: &str) {
         self.with_session(session_id, |session| {
             if !session.ready {
                 session.ready = true;
@@ -199,21 +206,19 @@ impl TerminalRegistry {
     }
 }
 
-pub fn open_terminal(
-    app: AppHandle,
-    registry: &Arc<TerminalRegistry>,
-    server_id: String,
+/// Register a new session and return its id and control receiver.
+fn register(
+    registry: &TerminalRegistry,
+    server_id: &str,
+    session_encoding: &'static Encoding,
     channel: Option<Channel>,
-) -> Result<String, String> {
+) -> (String, mpsc::Receiver<TerminalControl>) {
     let session_id = Uuid::new_v4().to_string();
     let (sender, receiver) = mpsc::channel::<TerminalControl>();
-    let session_encoding = get_server(&app, &server_id)
-        .map(|server| encoding::lookup(&server.encoding))
-        .unwrap_or(encoding_rs::UTF_8);
     lock(&registry.sessions).insert(
         session_id.clone(),
         Arc::new(Mutex::new(Session {
-            server_id: server_id.clone(),
+            server_id: server_id.into(),
             control: sender,
             encoding: session_encoding,
             buffer: Vec::new(),
@@ -223,6 +228,40 @@ pub fn open_terminal(
             subscribers: channel.into_iter().collect(),
         })),
     );
+    (session_id, receiver)
+}
+
+/// A shell on this computer (see `local_shell`).
+pub fn open_local(registry: &Arc<TerminalRegistry>) -> Result<String, String> {
+    let (session_id, receiver) = register(
+        registry,
+        local_shell::LOCAL_SERVER_ID,
+        encoding_rs::UTF_8,
+        None,
+    );
+    let thread_registry = registry.clone();
+    let thread_session_id = session_id.clone();
+    thread::spawn(move || {
+        let result = local_shell::run(thread_registry.clone(), thread_session_id.clone(), receiver);
+        let reason = result.err().unwrap_or_else(|| "终端已关闭".to_string());
+        thread_registry.mark_closed(&thread_session_id, reason);
+    });
+    Ok(session_id)
+}
+
+pub fn open_terminal(
+    app: AppHandle,
+    registry: &Arc<TerminalRegistry>,
+    server_id: String,
+    channel: Option<Channel>,
+) -> Result<String, String> {
+    if server_id == local_shell::LOCAL_SERVER_ID {
+        return open_local(registry);
+    }
+    let session_encoding = get_server(&app, &server_id)
+        .map(|server| encoding::lookup(&server.encoding))
+        .unwrap_or(encoding_rs::UTF_8);
+    let (session_id, receiver) = register(registry, &server_id, session_encoding, channel);
 
     let thread_registry = registry.clone();
     let thread_session_id = session_id.clone();
