@@ -571,6 +571,29 @@ fn terminal_session(app: &AppHandle, id: &str) {
         "the description line was cleared"
     );
 
+    // Every byte value reaches the remote side unchanged (what ZMODEM
+    // transfers need), including an ssh escape sequence.
+    let mut payload: Vec<u8> = (0..=255u8).collect();
+    payload.extend_from_slice(b"\r~.\r~C\r~?");
+    payload.resize(300, b'x');
+    let expected: String = payload.iter().map(|b| format!("{b:02x}")).collect();
+    terminal::terminal_input(
+        &registry,
+        &session,
+        b"stty raw -echo; head -c 300 | od -An -tx1 -v | tr -d ' \\n'; echo :end; stty sane\r"
+            .to_vec(),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    terminal::terminal_input(&registry, &session, payload).unwrap();
+    wait("binary input echoed as hex", &|| {
+        String::from_utf8_lossy(&output(&first_frames)).contains(&format!("{expected}:end"))
+    });
+    assert!(
+        registry.connected_to(&session, id),
+        "the escape sequence did not end the session"
+    );
+
     // Switched to GBK: typed text reaches the remote side as GBK bytes, and
     // GBK output reads back as text.
     assert_eq!(

@@ -567,6 +567,10 @@ fn build_ssh_command(server: &ServerRecord, invocation: &openssh::SshInvocation)
         command.env(key, value);
     }
     command.arg("-tt");
+    // No escape character: `~.` after a newline would otherwise end the
+    // session, and file transfers (rz/sz) send arbitrary bytes.
+    command.arg("-e");
+    command.arg("none");
     for arg in &invocation.args {
         command.arg(arg);
     }

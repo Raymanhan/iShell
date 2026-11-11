@@ -35,6 +35,7 @@ mod upload_scripts;
 
 use archive::*;
 pub use download::*;
+pub(crate) use download::{local_download_name, unique_file_path};
 pub use monitor::*;
 pub use remote::*;
 pub use sftp::*;

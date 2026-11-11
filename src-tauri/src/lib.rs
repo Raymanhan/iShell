@@ -19,6 +19,7 @@ mod terminal;
 mod time;
 mod transport;
 mod tunnel;
+mod zmodem_files;
 
 use pool::SshPool;
 use process_monitor::ProcessMonitorRegistry;
@@ -35,6 +36,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(Arc::new(TerminalRegistry::default()))
+        .manage(zmodem_files::PickedFiles::default())
         .manage(Arc::new(SshPool))
         .manage(Arc::new(ai::AiRegistry::default()))
         .manage(Arc::new(ProcessMonitorRegistry::default()))
@@ -110,6 +112,11 @@ pub fn run() {
             commands::terminal_input,
             commands::terminal_resize,
             commands::terminal_set_encoding,
+            commands::terminal_write,
+            commands::zmodem_pick_files,
+            commands::zmodem_read_file,
+            commands::zmodem_forget_files,
+            commands::zmodem_save_file,
             commands::close_terminal
         ])
         .build(tauri::generate_context!())

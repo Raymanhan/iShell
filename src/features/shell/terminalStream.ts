@@ -68,8 +68,16 @@ export class TerminalOutput {
    * buffer) starts the stream at the frame's offset.
    */
   push(offset: number, bytes: Uint8Array): string {
+    return this.decode(this.take(offset, bytes));
+  }
+
+  /**
+   * The bytes of a data frame not taken before (empty when it holds nothing
+   * new), for a caller that looks at them before decoding (file transfers).
+   */
+  take(offset: number, bytes: Uint8Array): Uint8Array {
     const frameEnd = offset + bytes.length;
-    if (frameEnd <= this.end) return "";
+    if (frameEnd <= this.end) return bytes.subarray(0, 0);
     if (offset > this.end) {
       // A gap: what was missed is gone. Start afresh where this frame begins.
       this.decoder.decode();
@@ -77,6 +85,11 @@ export class TerminalOutput {
     }
     const fresh = bytes.subarray(this.end - offset);
     this.end = frameEnd;
-    return this.decoder.decode(fresh, { stream: true });
+    return fresh;
+  }
+
+  /** Decode bytes taken with `take`, in order. */
+  decode(bytes: Uint8Array): string {
+    return bytes.length ? this.decoder.decode(bytes, { stream: true }) : "";
   }
 }

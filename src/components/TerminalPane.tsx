@@ -4,7 +4,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Terminal } from "@xterm/xterm";
 import { RefreshCw, X } from "lucide-react";
-import { command, isTauri } from "../api/tauri";
+import { command, isTauri, saveReceivedFile, writeTerminalBytes as sendRawBytes } from "../api/tauri";
+import { ZmodemController, type LocalFile } from "../features/shell/zmodem";
 import { getTerminalSurfaceReport, getTerminalTheme, type AppTheme } from "../constants/theme";
 import { splitShortcutDirection, type PaneRect, type SplitDirection } from "../features/shell/panes";
 import { directoryLinkProvider } from "../features/shell/directoryLinks";
@@ -124,6 +125,10 @@ function TerminalPaneBase({
   const readySessionRef = useRef<string | null>(null);
   // Decoded output per session; survives re-attaching, so nothing repeats.
   const outputsRef = useRef<Record<string, TerminalOutput>>({});
+  // ZMODEM (rz/sz) per session, fed once the session's replayed output has
+  // been shown, so a transfer in old output is not started again.
+  const zmodemsRef = useRef<Record<string, ZmodemController>>({});
+  const liveSessionsRef = useRef(new Set<string>());
   const encodingRef = useRef(tab.encoding ?? "UTF-8");
   encodingRef.current = tab.encoding ?? "UTF-8";
   const connectingNoticeRef = useRef(false);
@@ -185,10 +190,50 @@ function TerminalPaneBase({
 
   function writeTerminalBytes(sessionId: string, offset: number, bytes: Uint8Array) {
     const output = (outputsRef.current[sessionId] ??= new TerminalOutput(encodingRef.current));
-    const text = output.push(offset, bytes);
+    const fresh = output.take(offset, bytes);
+    if (!fresh.length) return;
+    if (liveSessionsRef.current.has(sessionId)) zmodemFor(sessionId).consume(fresh);
+    else showOutput(sessionId, fresh);
+  }
+
+  /** Decode and show ordinary output. */
+  function showOutput(sessionId: string, bytes: Uint8Array) {
+    const text = outputsRef.current[sessionId]?.decode(bytes);
     if (!text) return;
     terminalRef.current?.write(text);
     trackSensitivePrompt(text);
+  }
+
+  function zmodemFor(sessionId: string): ZmodemController {
+    let picked: string[] = [];
+    return (zmodemsRef.current[sessionId] ??= new ZmodemController({
+      write: (bytes) => sendRawBytes(sessionId, bytes),
+      output: (bytes) => showOutput(sessionId, bytes),
+      status: (text) => terminalRef.current?.write(`\r\n${text}`),
+      pickFiles: async () => {
+        const files = await command("zmodem_pick_files");
+        picked = files.map((file) => file.id);
+        return files.map(
+          (file): LocalFile => ({
+            name: file.name,
+            size: file.size,
+            mtime: file.mtime,
+            read: async (offset, length) =>
+              new Uint8Array(await command("zmodem_read_file", { id: file.id, offset, length })),
+          }),
+        );
+      },
+      saveFile: (name, chunks) => saveReceivedFile(name, chunks),
+      onActiveChange: (active) => {
+        if (active) {
+          terminalRef.current?.write("\r\n[iShell] ZMODEM 传输开始，按 Ctrl+C 取消");
+          return;
+        }
+        terminalRef.current?.write("\r\n");
+        if (picked.length) void command("zmodem_forget_files", { ids: picked }).catch(() => undefined);
+        picked = [];
+      },
+    }));
   }
 
   /** Decode the session's further output with `encoding`. */
@@ -451,6 +496,12 @@ function TerminalPaneBase({
   function rawSendTerminalInput(data: string, broadcast = true) {
     const currentSession = sessionRef.current;
     if (currentSession && closedSessionRef.current === currentSession) return;
+    // While a file transfer runs the line carries ZMODEM, not keystrokes.
+    const transfer = currentSession ? zmodemsRef.current[currentSession] : undefined;
+    if (transfer?.active) {
+      if (data.includes("\x03")) transfer.abort();
+      return;
+    }
     if (broadcast && broadcastingRef.current) onBroadcastInputRef.current?.(tab.id, data);
     updateCommandDraft(data);
     if (isTauri && currentSession) {
@@ -723,13 +774,16 @@ function TerminalPaneBase({
     };
     command("attach_terminal", { sessionId, onOutput: channel })
       .then((encoding) => {
-        if (active) switchDecoder(sessionId, encoding);
+        if (!active) return;
+        switchDecoder(sessionId, encoding);
+        liveSessionsRef.current.add(sessionId);
       })
       .catch((error) => {
         if (active) setNotice(String(error));
       });
     return () => {
       active = false;
+      liveSessionsRef.current.delete(sessionId);
       void command("detach_terminal", { sessionId, channelId: channel.id }).catch(() => undefined);
     };
   }, [setNotice, tab.sessionId]);

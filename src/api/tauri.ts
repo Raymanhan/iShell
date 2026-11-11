@@ -58,3 +58,30 @@ export async function command<K extends CommandName>(
     throw toCommandError(raw);
   }
 }
+
+/** Raw bytes for a terminal session, sent as they are (file transfers). */
+export async function writeTerminalBytes(sessionId: string, bytes: Uint8Array): Promise<void> {
+  try {
+    await invoke("terminal_write", bytes, { headers: { "session-id": sessionId } });
+  } catch (raw) {
+    throw toCommandError(raw);
+  }
+}
+
+/** Save a file received over ZMODEM in the downloads folder; returns its path. */
+export async function saveReceivedFile(name: string, chunks: Uint8Array[]): Promise<string> {
+  const size = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const body = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, at);
+    at += chunk.length;
+  }
+  let binary = "";
+  for (const byte of new TextEncoder().encode(name)) binary += String.fromCharCode(byte);
+  try {
+    return await invoke<string>("zmodem_save_file", body, { headers: { "file-name": btoa(binary) } });
+  } catch (raw) {
+    throw toCommandError(raw);
+  }
+}

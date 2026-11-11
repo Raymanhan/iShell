@@ -32,6 +32,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # lrzsz for the ZMODEM (rz/sz) tests.
+      - name: Install lrzsz
+        run: sudo apt-get update && sudo apt-get install -y lrzsz
+
       - name: Type-check and build
         run: npm run build
 
@@ -67,6 +71,7 @@ jobs:
             librsvg2-dev \
             libssl-dev \
             openssh-server \
+            lrzsz \
             xvfb
 
       - name: Check formatting
@@ -96,3 +101,15 @@ jobs:
 
       - name: End-to-end SSH tests (russh backend)
         run: xvfb-run -a cargo test --manifest-path src-tauri/Cargo.toml --features force-russh live_ -- --nocapture
+
+      # rz/sz over a real SSH session, with the frontend's ZMODEM code.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: ZMODEM over SSH
+        run: |
+          npm ci
+          node --test tests/zmodemSsh.test.mjs

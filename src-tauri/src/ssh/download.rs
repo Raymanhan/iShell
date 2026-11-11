@@ -45,7 +45,7 @@ pub(super) fn stream_remote_to_file(
 
 /// Pick a local file path under `dir` that doesn't collide with an existing
 /// entry, appending " (n)" before the extension as needed.
-pub(super) fn unique_file_path(dir: &Path, file_name: &str) -> PathBuf {
+pub(crate) fn unique_file_path(dir: &Path, file_name: &str) -> PathBuf {
     let mut candidate = dir.join(file_name);
     let mut counter = 1;
     while candidate.exists() {
@@ -91,12 +91,12 @@ pub(super) fn remote_parent(path: &str) -> String {
 }
 
 #[cfg(windows)]
-pub(super) fn local_download_name(name: &str) -> String {
+pub(crate) fn local_download_name(name: &str) -> String {
     sanitize_windows_file_name(name)
 }
 
 #[cfg(not(windows))]
-pub(super) fn local_download_name(name: &str) -> String {
+pub(crate) fn local_download_name(name: &str) -> String {
     name.to_string()
 }
 

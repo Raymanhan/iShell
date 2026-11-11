@@ -123,6 +123,21 @@ connections, secret export is optional and can be passphrase-protected.
 - Search the terminal output with `⌘F` (macOS) or `Ctrl+Shift+F`
   (Windows/Linux), with case, whole-word and regex options.
 
+### rz/sz File Transfers
+
+The terminal speaks ZMODEM (the server needs `lrzsz`):
+
+- Run `sz file` on the server: the file is saved in this computer's
+  Downloads folder, under a new name if one is taken, never overwriting.
+- Run `rz` on the server: pick one or more files to upload to the server's
+  current directory; cancelling the picker ends `rz`.
+- Progress shows in the terminal and typing is held during a transfer;
+  `Ctrl+C` cancels it.
+- OpenSSH terminals start with `ssh -e none`, so `~.` and other escape
+  sequences cannot end a session and binary data passes unchanged.
+
+For large files or whole folders, use the file panel (SFTP).
+
 ### Local Terminal
 
 Click the terminal icon at the left of the top bar, or choose **打开本地终端**

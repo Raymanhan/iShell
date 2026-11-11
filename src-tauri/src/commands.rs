@@ -14,6 +14,7 @@ use std::{
 use tauri::{ipc::Channel, AppHandle, State, WebviewWindow};
 use uuid::Uuid;
 
+use crate::zmodem_files;
 use crate::{
     error::AppResult,
     models::{
@@ -859,6 +860,74 @@ pub fn terminal_set_encoding(
     encoding: String,
 ) -> Result<String, String> {
     terminal::set_encoding(registry.inner(), &session_id, &encoding)
+}
+
+/// A header of a raw-body request.
+fn request_header(request: &tauri::ipc::Request<'_>, name: &str) -> Result<String, String> {
+    request
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .ok_or_else(|| format!("缺少请求头 {name}"))
+}
+
+fn raw_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a Vec<u8>, String> {
+    match request.body() {
+        tauri::ipc::InvokeBody::Raw(data) => Ok(data),
+        _ => Err("请求体应为原始字节".into()),
+    }
+}
+
+/// Raw bytes for a terminal session, sent unencoded (ZMODEM transfers). The
+/// body is the bytes; the `session-id` header names the session.
+#[tauri::command]
+pub fn terminal_write(
+    registry: State<'_, Arc<TerminalRegistry>>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    let session_id = request_header(&request, "session-id")?;
+    terminal::terminal_input(registry.inner(), &session_id, raw_body(&request)?.clone())
+}
+
+/// Pick files to send for `rz`; empty when cancelled.
+#[tauri::command]
+pub async fn zmodem_pick_files(app: AppHandle) -> Result<Vec<zmodem_files::PickedFile>, String> {
+    zmodem_files::pick(&app).await
+}
+
+#[tauri::command]
+pub fn zmodem_read_file(
+    files: State<'_, zmodem_files::PickedFiles>,
+    id: String,
+    offset: u64,
+    length: u64,
+) -> Result<tauri::ipc::Response, String> {
+    files
+        .read(&id, offset, length)
+        .map(tauri::ipc::Response::new)
+}
+
+#[tauri::command]
+pub fn zmodem_forget_files(files: State<'_, zmodem_files::PickedFiles>, ids: Vec<String>) {
+    files.forget(&ids)
+}
+
+/// Save a file received with `sz` in the downloads folder. The body is the
+/// file; the `file-name` header is its name, UTF-8 in base64.
+#[tauri::command]
+pub fn zmodem_save_file(
+    app: AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<String, String> {
+    use base64::Engine;
+    let encoded = request_header(&request, "file-name")?;
+    let name = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .ok_or("文件名无效")?;
+    zmodem_files::save(&app, &name, raw_body(&request)?)
 }
 
 #[tauri::command]

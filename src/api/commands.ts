@@ -64,6 +64,13 @@ export interface ChatResult {
   contextTokens: number;
 }
 
+export interface PickedFile {
+  id: string;
+  name: string;
+  size: number;
+  mtime: number | null;
+}
+
 export interface TextFile {
   content: string;
   revision: string;
@@ -176,6 +183,15 @@ export interface CommandMap {
   /** Returns the encoding's canonical name. */
   terminal_set_encoding: { args: { sessionId: string; encoding: string }; result: string };
   close_terminal: { args: { sessionId: string }; result: void };
+  /** Raw bytes in the request body: use `writeTerminalBytes`. */
+  terminal_write: { args: never; result: void };
+
+  // ZMODEM (rz/sz) files on this computer
+  zmodem_pick_files: { args: None; result: PickedFile[] };
+  zmodem_read_file: { args: { id: string; offset: number; length: number }; result: ArrayBuffer };
+  zmodem_forget_files: { args: { ids: string[] }; result: void };
+  /** Raw bytes in the request body: use `saveReceivedFile`. */
+  zmodem_save_file: { args: never; result: string };
 }
 
 export type CommandName = keyof CommandMap;
