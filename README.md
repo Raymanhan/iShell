@@ -378,6 +378,25 @@ for macOS, the NSIS installer for Windows, the AppImage for Linux) and publishes
 just without update packages. Keep the private key safe: releases signed with a
 different key are rejected by installed copies.
 
+### Code Signing
+
+Unsigned installers trigger Gatekeeper on macOS and SmartScreen on Windows.
+The release workflow signs them when these repository secrets are set, and
+otherwise builds unsigned installers with a warning:
+
+| Secret | Platform | Purpose |
+| --- | --- | --- |
+| `APPLE_CERTIFICATE` | macOS | Base64 of the Developer ID Application `.p12` (`base64 -i cert.p12`) |
+| `APPLE_CERTIFICATE_PASSWORD` | macOS | Password of that `.p12` |
+| `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | macOS | Notarization: Apple ID, an app-specific password, and the team ID |
+| `WINDOWS_CERTIFICATE` | Windows | Base64 of the code signing `.pfx` |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Windows | Password of that `.pfx` |
+
+On macOS the app is signed with the hardened runtime, notarized and stapled,
+and the DMG is signed, notarized and stapled too. On Windows the app, the NSIS
+installer and the MSI are signed with SHA-256 and timestamped. Each job then
+verifies the signatures and fails rather than publish a broken one.
+
 ## Project Structure
 
 ```text

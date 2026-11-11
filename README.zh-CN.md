@@ -286,6 +286,20 @@ npm run tauri signer generate -- -w ~/.tauri/ishell.key
 
 配置好后，发布工作流会为更新包签名（macOS 的 `.app.tar.gz`、Windows 的 NSIS 安装包、Linux 的 AppImage），并把 `latest.json` 和安装包一起发布。未配置时 Release 仍会正常构建，只是不包含更新包。请妥善保管私钥：换用其他密钥签名的版本会被已安装的应用拒绝。
 
+### 代码签名
+
+未签名的安装包在 macOS 上会被 Gatekeeper 拦截，在 Windows 上会触发 SmartScreen 提示。在仓库 Secrets 中配置以下项后，发布工作流会签名安装包；未配置时仍会构建未签名的安装包并给出警告：
+
+| Secret | 平台 | 用途 |
+| --- | --- | --- |
+| `APPLE_CERTIFICATE` | macOS | Developer ID Application 证书 `.p12` 的 Base64（`base64 -i cert.p12`） |
+| `APPLE_CERTIFICATE_PASSWORD` | macOS | 该 `.p12` 的密码 |
+| `APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID` | macOS | 公证：Apple ID、App 专用密码和团队 ID |
+| `WINDOWS_CERTIFICATE` | Windows | 代码签名证书 `.pfx` 的 Base64 |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Windows | 该 `.pfx` 的密码 |
+
+macOS 上应用以 hardened runtime 签名并完成公证和装订（staple），DMG 也会签名、公证和装订；Windows 上应用、NSIS 安装包和 MSI 均以 SHA-256 签名并加时间戳。每个构建任务随后会校验签名，签名无效时直接失败，不会发布。
+
 ## 项目结构
 
 ```text

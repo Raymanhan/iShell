@@ -98,23 +98,126 @@ jobs:
             echo "build-args=--config src-tauri/tauri.no-updater.conf.json" >> "${GITHUB_OUTPUT}"
           fi
 
+      # Windows code signing: WINDOWS_CERTIFICATE is a base64-encoded .pfx and
+      # WINDOWS_CERTIFICATE_PASSWORD its password. The certificate goes into the
+      # runner's user store and Tauri signs the app and both installers with
+      # signtool by thumbprint. Without it the installers are unsigned and
+      # SmartScreen warns on first launch.
+      - name: Import Windows signing certificate
+        id: windows-signing
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            Write-Output "::warning::WINDOWS_CERTIFICATE is not set; Windows installers will be unsigned."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          $config = @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $cert.Thumbprint
+                digestAlgorithm = "sha256"
+                timestampUrl = "http://timestamp.digicert.com"
+              }
+            }
+          } | ConvertTo-Json -Depth 4 -Compress
+          $configPath = Join-Path $env:RUNNER_TEMP "windows-signing.json"
+          Set-Content -Path $configPath -Value $config -Encoding utf8NoBOM
+          "build-args=--config $configPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # macOS code signing: APPLE_CERTIFICATE is a base64-encoded Developer ID
+      # Application .p12 and APPLE_CERTIFICATE_PASSWORD its password. It goes
+      # into a throwaway keychain so the DMG built below can be signed with
+      # the same identity. Notarization additionally needs APPLE_ID,
+      # APPLE_PASSWORD (an app-specific password) and APPLE_TEAM_ID. Without
+      # them the app is unsigned and Gatekeeper blocks the first launch.
+      - name: Import macOS signing certificate
+        id: macos-signing
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ -z "${APPLE_CERTIFICATE}" ]]; then
+            echo "::warning::APPLE_CERTIFICATE is not set; the macOS app will be unsigned."
+            exit 0
+          fi
+          KEYCHAIN="${RUNNER_TEMP}/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          echo "${APPLE_CERTIFICATE}" | base64 --decode > "${RUNNER_TEMP}/signing.p12"
+          security import "${RUNNER_TEMP}/signing.p12" -k "${KEYCHAIN}" \
+            -P "${APPLE_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/security
+          rm "${RUNNER_TEMP}/signing.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}" >/dev/null
+          # Put the new keychain first in the search list, keeping the others.
+          KEYCHAINS=("${KEYCHAIN}")
+          while IFS= read -r line; do
+            line="${line#*\"}"
+            KEYCHAINS+=("${line%\"}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "${KEYCHAINS[@]}"
+          IDENTITY="$(security find-identity -v -p codesigning "${KEYCHAIN}" | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+          if [[ -z "${IDENTITY}" ]]; then
+            echo "::error::APPLE_CERTIFICATE holds no Developer ID Application identity."
+            exit 1
+          fi
+          echo "identity=${IDENTITY}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${APPLE_ID}" && -n "${APPLE_PASSWORD}" && -n "${APPLE_TEAM_ID}" ]]; then
+            echo "notarize=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::warning::APPLE_ID, APPLE_PASSWORD or APPLE_TEAM_ID is not set; the macOS app is signed but not notarized."
+          fi
+
       - name: Build installer
         if: runner.os != 'macOS'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri -- build --target ${{ matrix.target }} ${{ steps.updater.outputs.build-args }}
+        run: npm run tauri -- build --target ${{ matrix.target }} ${{ steps.updater.outputs.build-args }} ${{ steps.windows-signing.outputs.build-args }}
 
+      # With APPLE_SIGNING_IDENTITY set, Tauri signs the app with the hardened
+      # runtime; with the APPLE_ID trio it also notarizes and staples it.
       - name: Build macOS app bundle
         if: runner.os == 'macOS'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri -- build --target ${{ matrix.target }} --bundles app ${{ steps.updater.outputs.build-args }}
+          APPLE_SIGNING_IDENTITY: ${{ steps.macos-signing.outputs.identity }}
+          APPLE_ID: ${{ steps.macos-signing.outputs.notarize && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ steps.macos-signing.outputs.notarize && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.macos-signing.outputs.notarize && secrets.APPLE_TEAM_ID || '' }}
+        run: |
+          # An empty APPLE_SIGNING_IDENTITY would be taken as an identity named "".
+          if [[ -z "${APPLE_SIGNING_IDENTITY}" ]]; then unset APPLE_SIGNING_IDENTITY; fi
+          for name in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!name}" ]]; then unset "${name}"; fi
+          done
+          npm run tauri -- build --target ${{ matrix.target }} --bundles app ${{ steps.updater.outputs.build-args }}
 
       - name: Create macOS DMG and name the update package
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          SIGNING_IDENTITY: ${{ steps.macos-signing.outputs.identity }}
+          NOTARIZE: ${{ steps.macos-signing.outputs.notarize }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           VERSION="$(node -p "require('./package.json').version")"
           if [[ "${{ matrix.target }}" == "aarch64-apple-darwin" ]]; then
@@ -131,12 +234,57 @@ jobs:
           mkdir -p "${DMG_DIR}"
           hdiutil create -volname "iShell" -srcfolder "${APP_PATH}" -ov -format UDZO "${DMG_PATH}"
 
+          # The DMG is made here rather than by Tauri, so sign, notarize and
+          # staple it here too: a downloaded DMG is checked before the app is.
+          if [[ -n "${SIGNING_IDENTITY}" ]]; then
+            codesign --sign "${SIGNING_IDENTITY}" --timestamp "${DMG_PATH}"
+            if [[ "${NOTARIZE}" == "true" ]]; then
+              xcrun notarytool submit "${DMG_PATH}" --wait \
+                --apple-id "${APPLE_ID}" --password "${APPLE_PASSWORD}" --team-id "${APPLE_TEAM_ID}"
+              xcrun stapler staple "${DMG_PATH}"
+            fi
+          fi
+
           # Both macOS jobs emit iShell.app.tar.gz; give each architecture its own name.
           UPDATE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
           if [[ -f "${UPDATE_DIR}/iShell.app.tar.gz" ]]; then
             UPDATE_NAME="iShell_${VERSION}_${ARCH_SUFFIX}.app.tar.gz"
             mv "${UPDATE_DIR}/iShell.app.tar.gz" "${UPDATE_DIR}/${UPDATE_NAME}"
             mv "${UPDATE_DIR}/iShell.app.tar.gz.sig" "${UPDATE_DIR}/${UPDATE_NAME}.sig"
+          fi
+
+      # Fail the release rather than publish installers whose signature is
+      # broken. Skipped where no certificate was configured.
+      - name: Verify Windows signatures
+        if: runner.os == 'Windows' && steps.windows-signing.outputs.build-args != ''
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Recurse "src-tauri/target/${{ matrix.target }}/release" -Include iShell.exe, *.msi |
+            Where-Object { $_.FullName -notmatch '\\deps\\' }
+          $files += Get-ChildItem -Recurse "src-tauri/target/${{ matrix.target }}/release/bundle/nsis" -Filter *-setup.exe
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature $file.FullName
+            Write-Output "$($file.Name): $($signature.Status)"
+            if ($signature.Status -ne 'Valid') { throw "$($file.Name) is not validly signed" }
+          }
+
+      - name: Verify macOS signatures
+        if: runner.os == 'macOS' && steps.macos-signing.outputs.identity != ''
+        shell: bash
+        env:
+          NOTARIZE: ${{ steps.macos-signing.outputs.notarize }}
+        run: |
+          APP_PATH="src-tauri/target/${{ matrix.target }}/release/bundle/macos/iShell.app"
+          codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
+          for dmg in src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg; do
+            codesign --verify --verbose=2 "${dmg}"
+          done
+          if [[ "${NOTARIZE}" == "true" ]]; then
+            xcrun stapler validate "${APP_PATH}"
+            spctl --assess --type execute --verbose=2 "${APP_PATH}"
+            for dmg in src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg; do
+              xcrun stapler validate "${dmg}"
+            done
           fi
 
       - name: Upload installer artifact

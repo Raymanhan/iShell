@@ -89,7 +89,7 @@ jobs:
       # Both backends against real SSH servers: one with SFTP (and an
       # SFTP-only account), one without the SFTP subsystem.
       - name: Start test SSH servers
-        run: sudo scripts/live-ssh-servers.sh "$RUNNER_TEMP/ssh" >> "$GITHUB_ENV"
+        run: sudo scripts/live-ssh-servers.sh "$RUNNER_TEMP/ssh" | tee -a "$GITHUB_ENV" > /dev/null
 
       - name: End-to-end SSH tests (OpenSSH backend)
         run: xvfb-run -a cargo test --manifest-path src-tauri/Cargo.toml live_ -- --nocapture
