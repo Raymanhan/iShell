@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { CommandArgs, CommandName, CommandResult } from "./commands";
 
 export const isTauri =
   typeof window !== "undefined" &&
@@ -43,9 +44,16 @@ export function hasErrorCode(error: unknown, code: string): boolean {
   return error instanceof CommandError && error.code === code;
 }
 
-export async function command<T>(name: string, args?: Record<string, unknown>): Promise<T> {
+/**
+ * Call a backend command. Its name decides the argument and result types
+ * (see `./commands`); commands without arguments take none.
+ */
+export async function command<K extends CommandName>(
+  name: K,
+  ...args: CommandArgs<K> extends Record<string, never> ? [] : [CommandArgs<K>]
+): Promise<CommandResult<K>> {
   try {
-    return await invoke<T>(name, args);
+    return await invoke<CommandResult<K>>(name, args[0]);
   } catch (raw) {
     throw toCommandError(raw);
   }

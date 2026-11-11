@@ -55,8 +55,8 @@ export function usePortForwards(showNotice: (message: string) => void) {
       else un();
     })();
     Promise.all([
-      command<PortForward[]>("list_port_forwards"),
-      command<PortForwardStatus[]>("port_forward_statuses"),
+      command("list_port_forwards"),
+      command("port_forward_statuses"),
     ])
       .then(([list, current]) => {
         setForwards(list);
@@ -86,7 +86,7 @@ export function usePortForwards(showNotice: (message: string) => void) {
       setForwards(next);
       return saved;
     }
-    const saved = await command<PortForward>("save_port_forward", { input });
+    const saved = await command("save_port_forward", { input });
     setForwards((current) =>
       current.some((item) => item.id === saved.id)
         ? current.map((item) => (item.id === saved.id ? saved : item))

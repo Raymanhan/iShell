@@ -385,7 +385,7 @@ function SecretStorageLine() {
   useEffect(() => {
     if (!isTauri) return;
     let cancelled = false;
-    command<"keychain" | "file">("secret_storage")
+    command("secret_storage")
       .then((value) => !cancelled && setStorage(value))
       .catch(() => !cancelled && setStorage("error"));
     return () => {

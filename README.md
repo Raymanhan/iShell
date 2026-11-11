@@ -382,11 +382,13 @@ different key are rejected by installed copies.
 
 ```text
 src/
-  api/              Tauri IPC wrappers and runtime detection
+  api/              Typed command map (name -> arguments and result), IPC
+                    wrapper with error codes, and runtime detection
   components/       React UI components
   constants/        Theme tokens and shared constants
   features/         Hooks and helpers per feature: connections, panes,
-                    transfer queues, snippets, port forwards, updates
+                    terminal output stream, transfer queues, command history,
+                    snippets, port forwards, monitoring, settings, updates
   mocks/            Browser-preview demo data
   styles/           CSS modules for base, layout, controls, views, and themes
   utils/            Formatting, highlighting and drag helpers

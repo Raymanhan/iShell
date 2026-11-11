@@ -18,12 +18,6 @@ import {
   type AiModel,
 } from "./types";
 
-interface ChatResult {
-  messages: Record<string, unknown>[];
-  stopped: boolean;
-  error: string | null;
-  contextTokens: number;
-}
 
 export function useAi(tabs: ShellTab[]) {
   const [config, setConfig] = useState<AiConfig>(defaultAiConfig);
@@ -152,7 +146,7 @@ export function useAi(tabs: ShellTab[]) {
   async function loadHistory() {
     const generation = ++historyGeneration.current;
     try {
-      const list = await command<AiHistorySummary[]>("ai_list_history");
+      const list = await command("ai_list_history");
       if (generation !== historyGeneration.current) return;
       saved.current = Object.fromEntries(list.map((value) => [value.id, value]));
       setSummaries(saved.current);
@@ -170,7 +164,7 @@ export function useAi(tabs: ShellTab[]) {
     if (loaded) return Promise.resolve(loaded);
     const pending = opening.current.get(id);
     if (pending) return pending;
-    const request = command<AiConversation>("ai_load_history", { id })
+    const request = command("ai_load_history", { id })
       .then((value) => {
         // Deleted, or opened by another caller, while this was loading.
         if (pendingWrites.current.get(id) === null) return null;
@@ -227,7 +221,7 @@ export function useAi(tabs: ShellTab[]) {
 
   useEffect(() => {
     if (isTauri)
-      command<AiConfig>("ai_get_config")
+      command("ai_get_config")
         .then((value) => {
           setConfig(value);
           setConfigLoaded(true);
@@ -267,7 +261,7 @@ export function useAi(tabs: ShellTab[]) {
     setModelsLoading(true);
     setModelsError("");
     try {
-      const catalog = await command<AiModel[]>("ai_list_models", {
+      const catalog = await command("ai_list_models", {
         input: null,
       });
       if (generation === modelsGeneration.current) setModels(catalog);
@@ -427,7 +421,7 @@ export function useAi(tabs: ShellTab[]) {
         }));
     };
     try {
-      const result = await command<ChatResult>("ai_chat", {
+      const result = await command("ai_chat", {
         input: {
           requestId,
           serverId: tab.serverId,
@@ -502,9 +496,11 @@ export function useAi(tabs: ShellTab[]) {
     if (
       !conversation?.requestId ||
       !entry?.approvalPending ||
+      !entry.approvalId ||
       entry.approvalBusy
     )
       return;
+    const approvalId = entry.approvalId;
     const patch = (change: Partial<typeof entry>) =>
       update(id, (value) => ({
         ...value,
@@ -516,7 +512,7 @@ export function useAi(tabs: ShellTab[]) {
     try {
       await command("ai_approve", {
         requestId: conversation.requestId,
-        approvalId: entry.approvalId,
+        approvalId,
         allow,
       });
       update(id, (value) => ({

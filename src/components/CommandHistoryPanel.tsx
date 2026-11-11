@@ -7,7 +7,7 @@ export function CommandHistoryPanel({
   commands,
   onPick,
 }: {
-  commands: string[];
+  commands: readonly string[];
   onPick: (command: string) => void;
 }) {
   const [query, setQuery] = useState("");

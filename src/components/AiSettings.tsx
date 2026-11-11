@@ -68,7 +68,7 @@ export function AiSettings({
     try {
       if (!isTauri)
         throw new Error("请在桌面客户端保存 AI 设置；预览模式不保存密钥。");
-      const value = await command<AiConfig>("ai_save_config", {
+      const value = await command("ai_save_config", {
         input: input(),
       });
       onSaved(value);
@@ -94,7 +94,7 @@ export function AiSettings({
     setNotice("");
     try {
       if (!isTauri) throw new Error("请在桌面客户端测试连接。");
-      const fetched = await command<AiModel[]>("ai_list_models", {
+      const fetched = await command("ai_list_models", {
         input: input(),
       });
       if (request !== generation.current) return;

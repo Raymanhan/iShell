@@ -290,10 +290,10 @@ npm run tauri signer generate -- -w ~/.tauri/ishell.key
 
 ```text
 src/
-  api/              Tauri IPC 封装和运行环境检测
+  api/              带类型的命令表（命令名对应参数与返回值）、带错误码的 IPC 封装和运行环境检测
   components/       React UI 组件
   constants/        主题 token 和共享常量
-  features/         按功能划分的 hooks 和工具：连接、分屏、传输队列、片段、端口转发、更新
+  features/         按功能划分的 hooks 和工具：连接、分屏、终端输出流、传输队列、命令历史、片段、端口转发、监控、设置、更新
   mocks/            浏览器预览用演示数据
   styles/           基础、布局、控件、视图和主题 CSS 模块
   utils/            格式化、高亮、拖动等工具

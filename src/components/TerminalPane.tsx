@@ -86,7 +86,7 @@ function TerminalPaneBase({
   onOpenDirectory?: (path: string) => void;
   pasteRequest?: { id: number; command: string } | null;
   commandRequest?: { id: number; command: string; requirePromptStart?: boolean; blockedNotice?: string } | null;
-  commandHistory: string[];
+  commandHistory: readonly string[];
   pane?: PanePlacement;
   onFocusPane?: () => void;
   onClosePane?: () => void;

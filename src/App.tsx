@@ -14,6 +14,7 @@ import { command, ErrorCode, hasErrorCode, isTauri } from "./api/tauri";
 import { BroadcastBar } from "./components/BroadcastBar";
 import { useAi } from "./features/ai/useAi";
 import { CommandHistoryPanel } from "./components/CommandHistoryPanel";
+import { useCommandHistory } from "./features/history/useCommandHistory";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ConnectionManager } from "./components/ConnectionManager";
 import { DownloadQueue } from "./components/DownloadQueue";
@@ -28,17 +29,6 @@ import { StatusDashboard } from "./components/StatusDashboard";
 import { TabBar } from "./components/TabBar";
 import { UpdateNotice } from "./components/UpdateNotice";
 import { UploadQueue } from "./components/UploadQueue";
-import {
-  readSavedTailViewerLines,
-  TAIL_VIEWER_DEFAULT_LINES_KEY,
-} from "./constants/tail";
-import {
-  applyWindowUnderlay,
-  readSavedTheme,
-  readSavedWindowTransparency,
-  WINDOW_TRANSPARENCY_KEY,
-  type AppTheme,
-} from "./constants/theme";
 import {
   connectionDeleteDescription,
   connectionDeleteTargetText,
@@ -83,19 +73,17 @@ import {
   TabGhostWindow,
   type TabDropPoint,
 } from "./features/shell/windowHandoff";
-import { applyNativeWindowTheme } from "./features/theme/nativeWindowTheme";
 import { usePortForwards } from "./features/forwards/usePortForwards";
 import { snippetInput, useSnippets } from "./features/snippets/useSnippets";
-import { AUTO_CHECK_UPDATES_KEY, readAutoCheckUpdates, useUpdater } from "./features/updater/useUpdater";
+import { useUpdater } from "./features/updater/useUpdater";
+import { useAppSettings } from "./features/settings/useAppSettings";
 import { demoStatus } from "./mocks/demoData";
 import { loadDemoFiles } from "./mocks/demoSftp";
 import type {
   FolderDownloadMode,
-  NetworkSample,
   PortForward,
   ProcessSamplePayload,
   ServerRecord,
-  ServerStatus,
   SftpEntry,
   Snippet,
   TailViewerConfig,
@@ -114,9 +102,6 @@ const SftpBrowser = lazy(() =>
 const SFTP_BUSY_MIN_MS = 520;
 const SFTP_COLUMN_MIN_MS = 420;
 const NOTICE_DURATION_MS = 4200;
-const COMMAND_HISTORY_LIMIT = 10_000;
-const DEMO_COMMAND_HISTORY_KEY = "ishell.commandHistory";
-const AUTO_HIDE_TOP_BAR_KEY = "ishell.autoHideTopBar";
 const MAX_EDITABLE_TEXT_BYTES = 1024 * 1024;
 const FILES_PANEL_RATIO = 0.4;
 const STATUS_PANEL_WIDTH = 300;
@@ -139,25 +124,21 @@ export default function App() {
   const [connectionsOpen, setConnectionsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsPage, setSettingsPage] = useState<"appearance" | "ai">("appearance");
-  const [theme, setTheme] = useState<AppTheme>(
-    () => readSavedTheme(window.localStorage.getItem("ishell.theme")),
-  );
-  const [windowTransparency, setWindowTransparency] = useState(
-    () => readSavedWindowTransparency(window.localStorage.getItem(WINDOW_TRANSPARENCY_KEY)),
-  );
-  const [terminalFontSize, setTerminalFontSize] = useState(() => {
-    const raw = window.localStorage.getItem("ishell.terminalFontSize");
-    const saved = raw === null ? Number.NaN : Number(raw);
-    return Number.isFinite(saved) ? Math.min(20, Math.max(11, saved)) : 14;
-  });
-  const [tailViewerDefaultLines, setTailViewerDefaultLines] = useState(
-    () => readSavedTailViewerLines(window.localStorage.getItem(TAIL_VIEWER_DEFAULT_LINES_KEY)),
-  );
-  const [autoCheckUpdates, setAutoCheckUpdates] = useState(readAutoCheckUpdates);
+  const {
+    theme,
+    setTheme,
+    windowTransparency,
+    setWindowTransparency,
+    terminalFontSize,
+    setTerminalFontSize,
+    tailViewerDefaultLines,
+    setTailViewerDefaultLines,
+    autoCheckUpdates,
+    setAutoCheckUpdates,
+    autoHideTopBar,
+    setAutoHideTopBar,
+  } = useAppSettings();
   const updater = useUpdater(autoCheckUpdates);
-  const [autoHideTopBar, setAutoHideTopBar] = useState(
-    () => window.localStorage.getItem(AUTO_HIDE_TOP_BAR_KEY) !== "false",
-  );
   const [tabs, setTabs] = useState<ShellTab[]>(() => handedOffInitialTab ? [handedOffInitialTab] : []);
   const ai = useAi(tabs);
   const [activeTabId, setActiveTabId] = useState<string | null>(() => handedOffInitialTab?.id ?? null);
@@ -169,7 +150,6 @@ export default function App() {
   const [filesDragging, setFilesDragging] = useState(false);
   const [sidePanel, setSidePanel] = useState<SidePanel | null>(null);
   const statusOpen = sidePanel === "status";
-  const [commandHistory, setCommandHistory] = useState<string[]>([]);
   const [statusPanelWidth, setStatusPanelWidth] = useState(STATUS_PANEL_WIDTH);
   const [pasteRequest, setPasteRequest] = useState<{ tabId: string; id: number; command: string } | null>(null);
   const [commandRequest, setCommandRequest] = useState<{
@@ -246,13 +226,11 @@ export default function App() {
 
   useEffect(() => {
     connections.refreshServers();
-    loadCommandHistory();
   }, []);
 
   useEffect(() => {
     if (!handedOffInitialTab) return;
     connections.setSelectedServerId(handedOffInitialTab.serverId);
-    loadCommandHistory();
   }, [handedOffInitialTab]);
 
   useEffect(() => {
@@ -331,21 +309,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    window.localStorage.setItem("ishell.theme", theme);
-  }, [theme]);
-
-  useEffect(() => {
-    applyWindowUnderlay(theme, windowTransparency);
-    window.localStorage.setItem(WINDOW_TRANSPARENCY_KEY, String(windowTransparency));
-  }, [theme, windowTransparency]);
-
-  useEffect(() => {
-    if (!isTauri) return;
-    void applyNativeWindowTheme(theme);
-  }, [theme]);
-
-  useEffect(() => {
     if (!isTauri) return;
     let unlisten: (() => void) | undefined;
     let active = true;
@@ -364,22 +327,6 @@ export default function App() {
       unlisten?.();
     };
   }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem("ishell.terminalFontSize", String(terminalFontSize));
-  }, [terminalFontSize]);
-
-  useEffect(() => {
-    window.localStorage.setItem(TAIL_VIEWER_DEFAULT_LINES_KEY, String(tailViewerDefaultLines));
-  }, [tailViewerDefaultLines]);
-
-  useEffect(() => {
-    window.localStorage.setItem(AUTO_HIDE_TOP_BAR_KEY, String(autoHideTopBar));
-  }, [autoHideTopBar]);
-
-  useEffect(() => {
-    window.localStorage.setItem(AUTO_CHECK_UPDATES_KEY, String(autoCheckUpdates));
-  }, [autoCheckUpdates]);
 
   useEffect(() => {
     return () => {
@@ -542,42 +489,6 @@ export default function App() {
     }
   }
 
-  function handleCommandSubmitted(commandText: string) {
-    const trimmed = commandText.trim();
-    if (!trimmed) return;
-    setCommandHistory((current) => {
-      const next = [trimmed, ...current].slice(0, COMMAND_HISTORY_LIMIT);
-      if (!isTauri) {
-        window.localStorage.setItem(DEMO_COMMAND_HISTORY_KEY, JSON.stringify(next));
-      }
-      return next;
-    });
-    if (isTauri) {
-      command("save_command_history", { commandText: trimmed }).catch((error) =>
-        showNotice(String(error)),
-      );
-    }
-  }
-
-  async function loadCommandHistory() {
-    try {
-      if (!isTauri) {
-        const saved = window.localStorage.getItem(DEMO_COMMAND_HISTORY_KEY);
-        const parsed = saved ? JSON.parse(saved) : [];
-        setCommandHistory(
-          Array.isArray(parsed)
-            ? parsed.filter((item) => typeof item === "string").slice(0, COMMAND_HISTORY_LIMIT)
-            : [],
-        );
-        return;
-      }
-      const next = await command<string[]>("list_command_history");
-      setCommandHistory(next.slice(0, COMMAND_HISTORY_LIMIT));
-    } catch (error) {
-      showNotice(String(error));
-    }
-  }
-
   function pasteHistoryCommand(commandText: string) {
     if (!activeTab) return;
     setPasteRequest({ tabId: activeTab.id, id: Date.now() + Math.random(), command: commandText });
@@ -639,6 +550,11 @@ export default function App() {
       noticeTimer.current = null;
     }, durationMs);
   }, []);
+
+  const commandHistory = useCommandHistory(
+    tabs.map((tab) => tab.serverId),
+    showNotice,
+  );
 
   const uploadQueue = useUploadQueue({
     showNotice,
@@ -739,7 +655,7 @@ export default function App() {
         showNotice(`${server.name} 已连接`);
         return;
       }
-      const sessionId = await command<string>("open_terminal", { id: server.id });
+      const sessionId = await command("open_terminal", { id: server.id });
       patchTab(tabId, { sessionId });
     } catch (error) {
       patchTab(tabId, { state: "closed" });
@@ -846,7 +762,7 @@ export default function App() {
         showNotice(`${tab.title} 已连接`);
         return;
       }
-      const sessionId = await command<string>("open_terminal", { id: tab.serverId });
+      const sessionId = await command("open_terminal", { id: tab.serverId });
       patchTab(tabId, { sessionId });
     } catch (error) {
       patchTab(tabId, { state: "closed" });
@@ -976,7 +892,7 @@ export default function App() {
   async function warmConnection(tabId: string, serverId: string) {
     if (!isTauri) return;
     try {
-      const entries = await command<SftpEntry[]>("sftp_list", { id: serverId, path: "/" });
+      const entries = await command("sftp_list", { id: serverId, path: "/" });
       setTabs((current) =>
         current.map((tab) =>
           tab.id === tabId
@@ -1093,7 +1009,7 @@ export default function App() {
         patchTab(tabId, { status: demoStatus });
         return;
       }
-      const next = await command<ServerStatus>("fetch_server_status", { id: serverId, includeDisk });
+      const next = await command("fetch_server_status", { id: serverId, includeDisk });
       setTabs((current) =>
         current.map((tab) => {
           if (tab.id !== tabId) return tab;
@@ -1150,7 +1066,7 @@ export default function App() {
         return;
       }
 
-      const sample = await command<NetworkSample>("fetch_network_sample", { id: serverId });
+      const sample = await command("fetch_network_sample", { id: serverId });
       setTabs((current) =>
         current.map((tab) => {
           if (tab.id !== tabId) return tab;
@@ -1209,7 +1125,7 @@ export default function App() {
 
     try {
       const entries = isTauri
-        ? await command<SftpEntry[]>("sftp_list", { id: serverId, path })
+        ? await command("sftp_list", { id: serverId, path })
         : await loadDemoFiles(path);
       await waitAtLeast(startedAt, SFTP_COLUMN_MIN_MS);
       setTabs((current) =>
@@ -1294,7 +1210,7 @@ export default function App() {
     beginSftpBusy();
     try {
       const resolved = isTauri
-        ? await command<string>("sftp_resolve_directory", { id: source.serverId, path })
+        ? await command("sftp_resolve_directory", { id: source.serverId, path })
         : path.replace(/^~[^/]*/, "/home/demo");
       const latest = tabsRef.current.find((tab) => tab.id === tabId);
       if (
@@ -1482,7 +1398,7 @@ export default function App() {
     beginSftpBusy();
     try {
       const { content, revision } = isTauri
-        ? await command<{ content: string; revision: string }>("sftp_read_text_file", {
+        ? await command("sftp_read_text_file", {
             id: serverId,
             path: entry.path,
           })
@@ -1566,7 +1482,7 @@ export default function App() {
     beginSftpBusy();
     try {
       if (isTauri) {
-        await command<string>("sftp_write_text_file", {
+        await command("sftp_write_text_file", {
           id: fileEditor.serverId,
           path: fileEditor.entry.path,
           content: fileEditor.content,
@@ -1805,11 +1721,11 @@ export default function App() {
                             layoutSignal={`${filesOpen}:${filesRatio}:${filesDragging}:${connectionsOpen}:${sidePanel}:${statusPanelWidth}:${tabs.length}`}
                             setNotice={showNotice}
                             onReady={() => handleTerminalReady(tab.id, tab.serverId, tab.title)}
-                            onCommandSubmitted={handleCommandSubmitted}
+                            onCommandSubmitted={(commandText) => commandHistory.record(tab.serverId, commandText)}
                             onOpenDirectory={(path) => void openTerminalDirectory(tab.id, path)}
                             pasteRequest={pasteRequest?.tabId === tab.id ? pasteRequest : null}
                             commandRequest={commandRequest?.tabId === tab.id ? commandRequest : null}
-                            commandHistory={commandHistory}
+                            commandHistory={commandHistory.forServer(tab.serverId)}
                             onClosed={() => {
                               terminalReadyTabs.current.delete(tab.id);
                               patchTab(tab.id, { state: "closed" });
@@ -1930,7 +1846,7 @@ export default function App() {
                       </Suspense>
                     )}
                     {sidePanel === "history" && (
-                      <CommandHistoryPanel commands={commandHistory} onPick={pasteHistoryCommand} />
+                      <CommandHistoryPanel commands={commandHistory.forServer(activeTab.serverId)} onPick={pasteHistoryCommand} />
                     )}
                     {sidePanel === "forwards" && (
                       <PortForwardsPanel
