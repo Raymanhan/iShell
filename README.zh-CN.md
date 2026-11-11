@@ -128,6 +128,8 @@ iShell 是一个基于 Tauri + React + Rust 的轻量级 SSH 桌面工作台，�
 
 远程文本编辑限制为小文件，避免在远程会话中加载超大文件导致界面卡顿。
 
+文件操作通过服务器的 SFTP 子系统完成，因此在没有 Python 的主机和仅允许 SFTP 的账号上也能使用文件面板。保存编辑的文件时先在同目录写入临时文件再改名替换，保留原文件的属主和权限，连接中断也不会留下写了一半的文件；如果文件在打开后被服务器上的其他人或程序修改过，保存会被拒绝，可以选择“仍然覆盖”。大文件传输在可用时通过独立连接使用 `tar`/`python3`，否则回退为 SFTP。没有 SFTP 子系统的服务器仍按原方式通过 Shell 命令操作。
+
 ### 实时日志滚动查看
 
 - 在 SFTP 文件右键菜单中选择实时滚动查看，针对当前主机上的文件打开独立窗口。
@@ -231,6 +233,14 @@ cargo test
 cargo test --features force-russh
 ```
 
+CI 还会用临时的本地 SSH 服务器对两个 SSH 后端做端到端测试。如需自行运行（仅限可丢弃的 Linux 机器，会创建本地账号）：
+
+```bash
+sudo scripts/live-ssh-servers.sh /tmp/ishell-live > live.env
+set -a; . ./live.env; set +a
+cd src-tauri && xvfb-run -a cargo test live_ -- --nocapture
+```
+
 ## 本地构建安装包
 
 ```bash
@@ -291,12 +301,15 @@ src/
 
 src-tauri/src/
   commands.rs       Tauri 命令边界
+  error.rs          带错误码、可供前端判断的命令错误
   models.rs         命令共享的可序列化 DTO
+  transport/        两个 SSH 后端的统一接口：系统 OpenSSH（macOS/Linux）和 russh（Windows）
   openssh.rs        OpenSSH 参数、跳板机 ProxyCommand 和 askpass 辅助
   pool.rs           传输失效和连接池边界
   russh_transport.rs Windows 使用的纯 Rust SSH 传输（含跳板机和端口转发）
-  ssh/              SSH 远程操作：命令执行、监控、SFTP、上传、下载
-  store.rs          服务器、片段、端口转发的本地数据库和密钥加密
+  ssh/              SSH 远程操作：命令执行、监控、SFTP 客户端与文件面板、上传、下载
+  store.rs          服务器、历史、片段、端口转发的本地数据库（版本化迁移）
+  secrets.rs        系统凭据库中的主密钥与 AES-GCM 加密
   tail_monitor.rs   远程文件实时滚动查看进程注册表
   terminal.rs       交互式终端会话注册表
   tunnel.rs         运行中的端口转发注册表

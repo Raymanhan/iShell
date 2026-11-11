@@ -2,11 +2,9 @@
 pub struct SshPool;
 
 impl SshPool {
-    pub fn invalidate(&self, _id: &str) {
-        // On the Unix path connections are multiplexed by the system `ssh`
-        // ControlMaster and expire on their own; on the russh path we hold the
-        // session ourselves and must evict it explicitly.
-        #[cfg(russh_backend)]
-        crate::russh_transport::invalidate(_id);
+    /// Drop any connection kept open for this server, so the next operation
+    /// connects afresh (after its address or credentials changed, say).
+    pub fn invalidate(&self, id: &str) {
+        crate::transport::invalidate(id);
     }
 }

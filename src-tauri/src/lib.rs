@@ -1,5 +1,8 @@
 mod ai;
 mod commands;
+mod error;
+#[cfg(test)]
+mod live_tests;
 mod models;
 mod openssh;
 mod pool;
@@ -12,6 +15,7 @@ mod store;
 mod tail_monitor;
 mod terminal;
 mod time;
+mod transport;
 mod tunnel;
 
 use pool::SshPool;

@@ -3,10 +3,6 @@
 
 #[cfg(any(windows, test))]
 use sha2::{Digest, Sha256};
-#[cfg(not(russh_backend))]
-use std::io::{BufRead, BufReader};
-#[cfg(not(russh_backend))]
-use std::process::{Command, Stdio};
 use std::{
     fs,
     io::{self, Read, Seek, SeekFrom, Write},
@@ -15,8 +11,6 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager};
 
-#[cfg(not(russh_backend))]
-use crate::store::jump_hops;
 use crate::{
     models::{
         DiskMount, NetworkSample, ProcessUsage, ServerInput, ServerRecord, ServerStatus, SftpEntry,
@@ -24,8 +18,9 @@ use crate::{
     },
     openssh,
     pool::SshPool,
-    store::{get_server, read_secret},
+    store::read_secret,
     time::{now, now_fractional},
+    transport::{self, TransferError, UploadAttemptError},
 };
 
 mod archive;
@@ -33,6 +28,8 @@ mod download;
 mod monitor;
 mod remote;
 mod sftp;
+mod sftp_client;
+mod sftp_transfer;
 mod upload;
 mod upload_scripts;
 
@@ -41,6 +38,7 @@ pub use download::*;
 pub use monitor::*;
 pub use remote::*;
 pub use sftp::*;
+pub(crate) use sftp_client::forget_sftp_session;
 pub use upload::*;
 use upload_scripts::*;
 
@@ -72,4 +70,19 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// Whether the file panel reaches this server over SFTP.
+#[cfg(test)]
+pub(crate) fn sftp_available_for_tests(app: &AppHandle, id: &str) -> bool {
+    sftp_client::with_sftp(app, id, async |_| Ok(())).is_ok()
+}
+
+/// Whether transfers for this server go over SFTP, optionally forcing them to.
+#[cfg(test)]
+pub(crate) fn sftp_transfers_for_tests(app: &AppHandle, id: &str, force: Option<bool>) -> bool {
+    if let Some(over_sftp) = force {
+        sftp_client::remember_exec_transfers(id, !over_sftp);
+    }
+    sftp_transfer::use_sftp_transfers(app, id)
 }

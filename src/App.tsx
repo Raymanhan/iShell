@@ -10,7 +10,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { command, isTauri } from "./api/tauri";
+import { command, ErrorCode, hasErrorCode, isTauri } from "./api/tauri";
 import { BroadcastBar } from "./components/BroadcastBar";
 import { useAi } from "./features/ai/useAi";
 import { CommandHistoryPanel } from "./components/CommandHistoryPanel";
@@ -1462,12 +1462,15 @@ export default function App() {
     });
     beginSftpBusy();
     try {
-      const content = isTauri
-        ? await command<string>("sftp_read_text_file", { id: serverId, path: entry.path })
-        : `# 演示模式\n正在编辑 ${entry.path}\n`;
+      const { content, revision } = isTauri
+        ? await command<{ content: string; revision: string }>("sftp_read_text_file", {
+            id: serverId,
+            path: entry.path,
+          })
+        : { content: `# 演示模式\n正在编辑 ${entry.path}\n`, revision: "demo" };
       setFileEditor((current) =>
         current?.entry.path === entry.path && current.tabId === tabId
-          ? { ...current, content, originalContent: content, loading: false, error: undefined }
+          ? { ...current, content, originalContent: content, revision, loading: false, error: undefined }
           : current,
       );
     } catch (error) {
@@ -1531,21 +1534,25 @@ export default function App() {
     }
   }
 
-  async function saveFileEditor() {
+  async function saveFileEditor(overwrite = false) {
     if (!fileEditor || fileEditor.loading || fileEditor.saving) return;
     const size = new TextEncoder().encode(fileEditor.content).length;
     if (size > MAX_EDITABLE_TEXT_BYTES) {
       setFileEditor((current) => current ? { ...current, error: "内容超过 1 MB，无法保存" } : current);
       return;
     }
-    setFileEditor((current) => current ? { ...current, saving: true, error: undefined } : current);
+    setFileEditor((current) =>
+      current ? { ...current, saving: true, error: undefined, conflict: false } : current,
+    );
     beginSftpBusy();
     try {
       if (isTauri) {
-        await command("sftp_write_text_file", {
+        await command<string>("sftp_write_text_file", {
           id: fileEditor.serverId,
           path: fileEditor.entry.path,
           content: fileEditor.content,
+          // Without a revision the save overwrites whatever is there.
+          expectedRevision: overwrite ? null : fileEditor.revision ?? null,
         });
       }
       setFileEditor(null);
@@ -1553,9 +1560,14 @@ export default function App() {
       const parent = parentPath(fileEditor.entry.path);
       refreshVisibleFiles(fileEditor.tabId, fileEditor.serverId, parent);
     } catch (error) {
-      const message = String(error);
-      setFileEditor((current) => current ? { ...current, saving: false, error: message } : current);
-      showNotice(message);
+      const conflict = hasErrorCode(error, ErrorCode.fileChanged);
+      const message = conflict
+        ? "远程文件在打开后已被修改。可以复制当前内容后重新打开，或选择“仍然覆盖”。"
+        : String(error);
+      setFileEditor((current) =>
+        current ? { ...current, saving: false, error: message, conflict } : current,
+      );
+      showNotice(conflict ? "远程文件已被修改，未保存" : message);
     } finally {
       endSftpBusy();
     }
@@ -2025,7 +2037,8 @@ export default function App() {
           onChange={(content) =>
             setFileEditor((current) => (current ? { ...current, content, error: undefined } : current))
           }
-          onSave={saveFileEditor}
+          onSave={() => void saveFileEditor()}
+          onOverwrite={() => void saveFileEditor(true)}
           onClose={closeFileEditor}
         />
       )}

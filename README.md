@@ -184,6 +184,16 @@ Supported operations:
 Text editing is intentionally limited to small files so the UI remains
 responsive and safe for remote sessions.
 
+File operations use the server's SFTP subsystem, so the file panel works on
+hosts without Python and on accounts restricted to SFTP. Saving an edited file
+writes a temporary file beside it and renames it into place, keeping the
+file's owner and permissions, so a dropped connection never leaves a
+half-written file. If the file changed on the server after it was opened, the
+save is refused and you can choose to overwrite it. Large transfers use
+`tar`/`python3` over a dedicated connection where available and fall back to
+SFTP otherwise. Servers without an SFTP subsystem still work through shell
+commands, as before.
+
 ### Live Tail Viewer
 
 - Open **Live Tail** from the SFTP context menu for a file on the active host.
@@ -304,6 +314,16 @@ cargo test
 cargo test --features force-russh
 ```
 
+CI also runs end-to-end tests of both SSH backends against throwaway local
+SSH servers. To run them yourself on a disposable Linux machine (they create
+local accounts):
+
+```bash
+sudo scripts/live-ssh-servers.sh /tmp/ishell-live > live.env
+set -a; . ./live.env; set +a
+cd src-tauri && xvfb-run -a cargo test live_ -- --nocapture
+```
+
 ## Local Installer Build
 
 ```bash
@@ -374,14 +394,19 @@ src/
 
 src-tauri/src/
   commands.rs       Tauri command boundary
+  error.rs          Command errors with codes the frontend can act on
   models.rs         Serializable DTOs shared by commands
+  transport/        The one interface to both SSH backends: system OpenSSH
+                    (macOS/Linux) and russh (Windows)
   openssh.rs        OpenSSH arguments, jump host ProxyCommand, askpass helper
   pool.rs           Transport invalidation / pooled-session boundary
   russh_transport.rs Pure-Rust SSH transport used by the Windows backend,
                     including jump hosts and port forwarding
-  ssh/              Remote operations: commands, monitoring, SFTP, uploads,
-                    downloads
-  store.rs          Local database for servers, snippets and port forwards
+  ssh/              Remote operations: commands, monitoring, SFTP client and
+                    file panel, uploads, downloads
+  store.rs          Local database (versioned migrations) for servers,
+                    history, snippets and port forwards
+  secrets.rs        Master key in the OS credential store; AES-GCM encryption
   tail_monitor.rs   Live remote file tail process registry
   terminal.rs       Interactive terminal session registry
   tunnel.rs         Registry of running port forwards

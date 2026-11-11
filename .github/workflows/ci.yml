@@ -65,7 +65,9 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            libssl-dev
+            libssl-dev \
+            openssh-server \
+            xvfb
 
       - name: Check formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
@@ -83,3 +85,14 @@ jobs:
 
       - name: Test (russh backend)
         run: cargo test --manifest-path src-tauri/Cargo.toml --features force-russh
+
+      # Both backends against real SSH servers: one with SFTP (and an
+      # SFTP-only account), one without the SFTP subsystem.
+      - name: Start test SSH servers
+        run: sudo scripts/live-ssh-servers.sh "$RUNNER_TEMP/ssh" >> "$GITHUB_ENV"
+
+      - name: End-to-end SSH tests (OpenSSH backend)
+        run: xvfb-run -a cargo test --manifest-path src-tauri/Cargo.toml live_ -- --nocapture
+
+      - name: End-to-end SSH tests (russh backend)
+        run: xvfb-run -a cargo test --manifest-path src-tauri/Cargo.toml --features force-russh live_ -- --nocapture

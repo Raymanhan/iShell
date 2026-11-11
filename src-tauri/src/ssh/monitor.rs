@@ -138,110 +138,18 @@ pub fn stream_process_usage(
     let remote_command = format!("sh -lc {}", openssh::shell_quote(PROCESS_TOP_SCRIPT));
     let mut parser = TopStreamParser::default();
 
-    #[cfg(not(russh_backend))]
-    {
-        let (mut child, helper_path) = spawn_remote(app, id, &remote_command, false, true, true)?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "无法读取进程监控输出".to_string())?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "无法读取进程监控错误输出".to_string())?;
-
-        let (line_sender, line_receiver) = std::sync::mpsc::channel::<Vec<u8>>();
-        let stdout_reader = std::thread::spawn(move || -> io::Result<()> {
-            let mut reader = BufReader::new(stdout);
-            loop {
-                let mut line = Vec::new();
-                let size = reader.read_until(b'\n', &mut line)?;
-                if size == 0 || line_sender.send(line).is_err() {
-                    return Ok(());
-                }
-            }
-        });
-        let stderr_reader = std::thread::spawn(move || -> io::Result<Vec<u8>> {
-            let mut stderr = stderr;
-            let mut output = Vec::new();
-            stderr.read_to_end(&mut output)?;
-            Ok(output)
-        });
-
-        let mut canceled = false;
-        loop {
-            if is_canceled() {
-                canceled = true;
-                let _ = child.kill();
-                break;
-            }
-            match line_receiver.recv_timeout(Duration::from_millis(250)) {
-                Ok(line) => {
-                    for (top_cpu, top_memory) in parser.push(&line) {
-                        on_sample(top_cpu, top_memory);
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if child
-                        .try_wait()
-                        .map_err(|err| format!("检查进程监控状态失败：{err}"))?
-                        .is_some()
-                    {
-                        break;
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            }
+    let result = transport::stream(app, id, &remote_command, &is_canceled, &mut |chunk| {
+        for (top_cpu, top_memory) in parser.push(chunk) {
+            on_sample(top_cpu, top_memory);
         }
-
-        let status = child
-            .wait()
-            .map_err(|err| format!("等待进程监控结束失败：{err}"));
-        cleanup_askpass_helper(helper_path.as_ref());
-        let stdout_result = stdout_reader
-            .join()
-            .map_err(|_| "进程监控输出线程异常退出".to_string())?;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| "进程监控错误输出线程异常退出".to_string())?
-            .map_err(|err| format!("读取进程监控错误输出失败：{err}"))?;
-        if canceled {
-            return Ok(());
-        }
-        stdout_result.map_err(|err| format!("读取进程监控输出失败：{err}"))?;
+    })
+    .map_err(|err| format!("进程监控失败：{err}"));
+    if !is_canceled() {
         if let Some((top_cpu, top_memory)) = parser.finish() {
             on_sample(top_cpu, top_memory);
         }
-        let status = status?;
-        if !status.success() {
-            return Err(format_process_error("进程监控失败", &stderr));
-        }
-        Ok(())
     }
-
-    #[cfg(russh_backend)]
-    {
-        let server = get_server(app, id)?;
-        let secret = read_secret(app, id).ok().filter(|value| !value.is_empty());
-        let result = crate::russh_transport::stream_command(
-            &server,
-            secret.as_deref(),
-            &remote_command,
-            &is_canceled,
-            &mut |chunk| {
-                for (top_cpu, top_memory) in parser.push(chunk) {
-                    on_sample(top_cpu, top_memory);
-                }
-            },
-        )
-        .map_err(|err| format!("SSH 进程监控失败：{err}"));
-        if !is_canceled() {
-            if let Some((top_cpu, top_memory)) = parser.finish() {
-                on_sample(top_cpu, top_memory);
-            }
-        }
-        result
-    }
+    result
 }
 
 /// Follow a remote regular file without loading it into memory. This is kept
@@ -258,99 +166,9 @@ pub fn stream_tail_file(
 ) -> Result<(), String> {
     let remote_command = tail_remote_command(path, initial_lines);
 
-    #[cfg(not(russh_backend))]
-    {
-        let (mut child, helper_path) = spawn_remote(app, id, &remote_command, false, true, true)?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "无法读取滚动查看输出".to_string())?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "无法读取滚动查看错误输出".to_string())?;
-
-        let (chunk_sender, chunk_receiver) = std::sync::mpsc::channel::<Vec<u8>>();
-        let stdout_reader = std::thread::spawn(move || -> io::Result<()> {
-            let mut reader = BufReader::new(stdout);
-            loop {
-                let mut chunk = vec![0_u8; 16 * 1024];
-                let size = reader.read(&mut chunk)?;
-                if size == 0 {
-                    return Ok(());
-                }
-                chunk.truncate(size);
-                if chunk_sender.send(chunk).is_err() {
-                    return Ok(());
-                }
-            }
-        });
-        let stderr_reader = std::thread::spawn(move || -> io::Result<Vec<u8>> {
-            let mut stderr = stderr;
-            let mut output = Vec::new();
-            stderr.read_to_end(&mut output)?;
-            Ok(output)
-        });
-
-        on_ready();
-        let mut canceled = false;
-        loop {
-            if is_canceled() {
-                canceled = true;
-                let _ = child.kill();
-                break;
-            }
-            match chunk_receiver.recv_timeout(Duration::from_millis(250)) {
-                Ok(chunk) => on_data(&chunk),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if child
-                        .try_wait()
-                        .map_err(|err| format!("检查滚动查看状态失败：{err}"))?
-                        .is_some()
-                    {
-                        break;
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-
-        let status = child
-            .wait()
-            .map_err(|err| format!("等待滚动查看命令结束失败：{err}"));
-        cleanup_askpass_helper(helper_path.as_ref());
-        let stdout_result = stdout_reader
-            .join()
-            .map_err(|_| "滚动查看输出线程异常退出".to_string())?;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| "滚动查看错误线程异常退出".to_string())?
-            .map_err(|err| format!("读取滚动查看错误输出失败：{err}"))?;
-        if canceled {
-            return Ok(());
-        }
-        stdout_result.map_err(|err| format!("读取滚动查看输出失败：{err}"))?;
-        let status = status?;
-        if !status.success() {
-            return Err(format_process_error("滚动查看失败", &stderr));
-        }
-        Ok(())
-    }
-
-    #[cfg(russh_backend)]
-    {
-        let server = get_server(app, id)?;
-        let secret = read_secret(app, id).ok().filter(|value| !value.is_empty());
-        on_ready();
-        crate::russh_transport::stream_command(
-            &server,
-            secret.as_deref(),
-            &remote_command,
-            &is_canceled,
-            &mut on_data,
-        )
-        .map_err(|err| format!("SSH 滚动查看失败：{err}"))
-    }
+    on_ready();
+    transport::stream(app, id, &remote_command, &is_canceled, &mut on_data)
+        .map_err(|err| format!("滚动查看失败：{err}"))
 }
 
 pub(super) fn tail_remote_command(path: &str, initial_lines: u32) -> String {

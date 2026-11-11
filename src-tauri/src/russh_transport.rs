@@ -9,10 +9,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use russh::{client, ChannelMsg};
-use tokio::runtime::Runtime;
 
 use crate::models::{JumpHop, PortForward, ServerRecord};
 use crate::terminal::TerminalControl;
+use crate::transport::{
+    runtime, ForwardEnded, ForwardRunning, StopForward, Subsystem, TransferError,
+};
 
 type Session = client::Handle<ClientHandler>;
 
@@ -25,13 +27,6 @@ const TRANSFER_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const UPLOAD_FAILURE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const UPLOAD_ERROR_MARKER_PREFIX: &str = "__ISHELL_UPLOAD_";
 const UPLOAD_HEARTBEAT_MARKER: &str = "__ISHELL_UPLOAD_HEARTBEAT__";
-
-/// Result of a streaming transfer: a clean finish, a user cancellation, or a
-/// hard failure (carrying a message for the UI).
-pub enum TransferError {
-    Canceled,
-    Failed(String),
-}
 
 /// Upload failures carry an explicit retry flag. The caller writes to a
 /// transaction temp path, so connection failures remain retry-safe even after
@@ -307,18 +302,6 @@ fn jump_hops(server: &ServerRecord) -> Result<Vec<JumpHop>, String> {
         Some(resolve) => resolve(server),
         None => Ok(Vec::new()),
     }
-}
-
-fn runtime() -> Result<&'static Runtime, String> {
-    static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-    if let Some(rt) = RUNTIME.get() {
-        return Ok(rt);
-    }
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| format!("无法创建异步运行时：{err}"))?;
-    Ok(RUNTIME.get_or_init(|| rt))
 }
 
 /// Cache of live sessions keyed by server id. A `russh` handle can open many
@@ -890,6 +873,99 @@ pub fn upload(
     })
 }
 
+/// A subsystem channel's stream together with the session it runs on, so a
+/// dedicated session lives exactly as long as the stream.
+struct HeldStream<S, H> {
+    stream: S,
+    _session: H,
+}
+
+impl<S: tokio::io::AsyncRead + Unpin, H: Unpin> tokio::io::AsyncRead for HeldStream<S, H> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin, H: Unpin> tokio::io::AsyncWrite for HeldStream<S, H> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+/// Wait for the server to accept or refuse a subsystem request.
+async fn subsystem_accepted(
+    channel: &mut russh::Channel<client::Msg>,
+    name: &str,
+) -> Result<(), String> {
+    let refused = || format!("服务器没有提供 {name} 子系统");
+    loop {
+        match tokio::time::timeout(COMMAND_TIMEOUT, channel.wait()).await {
+            Ok(Some(ChannelMsg::Success)) => return Ok(()),
+            Ok(Some(ChannelMsg::Failure | ChannelMsg::Close | ChannelMsg::Eof)) | Ok(None) => {
+                return Err(refused())
+            }
+            Ok(Some(_)) => {}
+            Err(_) => return Err(format!("等待 {name} 子系统响应超时")),
+        }
+    }
+}
+
+/// Open a subsystem (such as `sftp`) as a byte stream, on the pooled session
+/// or, with `dedicated`, on a session of its own.
+pub async fn open_subsystem(
+    server: &ServerRecord,
+    secret: Option<&str>,
+    name: &str,
+    dedicated: bool,
+) -> Result<Subsystem, String> {
+    let request = |err: russh::Error| format!("无法请求 {name} 子系统：{err}");
+    if dedicated {
+        let (session, mut channel) = isolated_channel(server, secret).await?;
+        channel
+            .request_subsystem(true, name)
+            .await
+            .map_err(request)?;
+        subsystem_accepted(&mut channel, name).await?;
+        Ok(Box::new(HeldStream {
+            stream: channel.into_stream(),
+            _session: session,
+        }))
+    } else {
+        let (session, mut channel) = session_channel(server, secret).await?;
+        channel
+            .request_subsystem(true, name)
+            .await
+            .map_err(request)?;
+        subsystem_accepted(&mut channel, name).await?;
+        Ok(Box::new(HeldStream {
+            stream: channel.into_stream(),
+            _session: session,
+        }))
+    }
+}
+
 /// Drive an interactive shell over a russh PTY channel. Output bytes are handed
 /// to `on_data`; input/resize/close come from the shared `control` receiver.
 /// Blocks until the channel closes or a `Close` control message is received.
@@ -958,11 +1034,6 @@ pub fn run_terminal(
     })
 }
 
-/// Called once a port forward is listening; the forward then runs until stopped.
-pub type ForwardRunning = Box<dyn Fn() + Send + Sync>;
-/// Called when a port forward ends on its own, with the reason.
-pub type ForwardEnded = Box<dyn FnOnce(String) + Send>;
-
 /// Start a port forward on the shared runtime. Returns a function that stops
 /// it; a forward stopped that way does not report `on_end`.
 pub fn start_port_forward(
@@ -971,7 +1042,7 @@ pub fn start_port_forward(
     forward: PortForward,
     on_running: ForwardRunning,
     on_end: ForwardEnded,
-) -> Result<Box<dyn Fn() + Send + Sync>, String> {
+) -> Result<StopForward, String> {
     let rt = runtime()?;
     let task = rt.spawn(async move {
         match forward.kind.as_str() {

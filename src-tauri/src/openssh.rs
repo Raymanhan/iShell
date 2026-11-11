@@ -57,9 +57,9 @@ pub fn ssh_binary() -> String {
 /// Unix socket paths are limited to about 104 bytes (macOS) or 108 (Linux).
 #[cfg(not(russh_backend))]
 const MAX_SOCKET_PATH: usize = 100;
-/// `<slug>.sock`, with a slug of at most 18 characters.
+/// `<slug>-<fingerprint>.sock`: a 10-character slug and 12 hex digits.
 #[cfg(not(russh_backend))]
-const SOCKET_NAME_LEN: usize = 18 + ".sock".len();
+const SOCKET_NAME_LEN: usize = 10 + 1 + 12 + ".sock".len();
 
 /// Make `dir` a directory only this user can enter, or report that it is not
 /// one: a symlink, someone else's directory, or one others can write to.
@@ -99,15 +99,43 @@ fn control_dir() -> Option<PathBuf> {
 
 /// The ControlMaster socket for a server, or `None` when no private directory
 /// is available and connections cannot be shared safely.
+///
+/// The name includes a fingerprint of everything that decides where and as
+/// whom the connection logs in. A master connection outlives its last client
+/// (`ControlPersist`), so after a server is edited its old connection must not
+/// be picked up again by name: commands would keep reaching the old host or
+/// account.
 #[cfg(not(russh_backend))]
-pub fn control_path(server_id: &str) -> Option<PathBuf> {
-    let slug: String = server_id
+pub fn control_path(server: &ServerRecord) -> Option<PathBuf> {
+    use sha2::{Digest, Sha256};
+
+    let slug: String = server
+        .id
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
-        .take(18)
+        .take(10)
         .collect();
     let slug = if slug.is_empty() { "server" } else { &slug };
-    Some(control_dir()?.join(format!("{slug}.sock")))
+    let mut hasher = Sha256::new();
+    for part in [
+        server.id.as_str(),
+        server.host.as_str(),
+        &server.port.to_string(),
+        server.username.as_str(),
+        server.auth_type.as_str(),
+        server.key_path.as_deref().unwrap_or_default(),
+        server.jump_server_id.as_deref().unwrap_or_default(),
+    ] {
+        // Length-prefixed, so ("ab", "c") and ("a", "bc") differ.
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let fingerprint: String = digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Some(control_dir()?.join(format!("{slug}-{fingerprint}.sock")))
 }
 
 /// `multiplex = true` shares one `ControlMaster` connection with the terminal
@@ -119,7 +147,7 @@ pub fn control_path(server_id: &str) -> Option<PathBuf> {
 /// on a shared socket.
 #[cfg(not(russh_backend))]
 pub fn common_ssh_args(server: &ServerRecord, multiplex: bool) -> Vec<String> {
-    let mut args = if let Some(control_path) = control_path(&server.id).filter(|_| multiplex) {
+    let mut args = if let Some(control_path) = control_path(server).filter(|_| multiplex) {
         vec![
             "-o".into(),
             "ControlMaster=auto".into(),
@@ -443,9 +471,39 @@ mod tests {
     fn control_sockets_live_in_a_private_directory() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-        let path = control_path("3f2a-77c1/../x").unwrap();
-        assert_eq!(path.file_name().unwrap(), "3f2a77c1x.sock");
+        let target = server("3f2a-77c1/../x-long-id", "10.0.0.10", "app", "password");
+        let path = control_path(&target).unwrap();
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("3f2a77c1xl-") && name.ends_with(".sock"),
+            "{name}"
+        );
+        assert_eq!(name.len(), SOCKET_NAME_LEN);
         assert!(path.as_os_str().len() <= MAX_SOCKET_PATH);
+        assert_eq!(
+            control_path(&target),
+            Some(path.clone()),
+            "stable for a server"
+        );
+
+        // Any change to where or as whom it logs in gives a new connection.
+        let edits: [fn(&mut ServerRecord); 5] = [
+            |s| s.host = "10.0.0.11".into(),
+            |s| s.port = 2222,
+            |s| s.username = "root".into(),
+            |s| s.key_path = Some("~/.ssh/other".into()),
+            |s| s.jump_server_id = Some("bastion".into()),
+        ];
+        for edit in edits {
+            let mut edited = target.clone();
+            edit(&mut edited);
+            assert_ne!(control_path(&edited), Some(path.clone()));
+        }
+        // Cosmetic edits keep sharing it.
+        let mut renamed = target.clone();
+        renamed.name = "renamed".into();
+        renamed.notes = "notes".into();
+        assert_eq!(control_path(&renamed), Some(path.clone()));
         let dir = fs::metadata(path.parent().unwrap()).unwrap();
         assert!(dir.is_dir());
         assert_eq!(dir.uid(), unsafe { libc::geteuid() });

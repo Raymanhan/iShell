@@ -15,6 +15,7 @@ use tauri::{AppHandle, State, WebviewWindow};
 use uuid::Uuid;
 
 use crate::{
+    error::AppResult,
     models::{
         ConnectionExport, ConnectionExportServer, ConnectionImport, ConnectionImportServer,
         EncryptedExportSecret, NetworkSample, PortForward, PortForwardInput, PortForwardStatus,
@@ -27,6 +28,7 @@ use crate::{
         download_file, download_folder, fetch_network_sample as fetch_network, fetch_status,
         list_sftp, make_directory, read_text_file, remove_entry, rename_entry,
         resolve_sftp_directory, test_connection, upload_file, upload_folder, write_text_file,
+        TextFile,
     },
     store::{
         append_command_history, delete_port_forward as remove_port_forward,
@@ -760,11 +762,13 @@ pub async fn sftp_read_text_file(
     pool: State<'_, Arc<SshPool>>,
     id: String,
     path: String,
-) -> Result<String, String> {
+) -> Result<TextFile, String> {
     let pool = pool.inner().clone();
     run_blocking(move || read_text_file(&pool, &app, &id, &path)).await
 }
 
+/// Save an edited file and return its new revision. `expected_revision` is
+/// the revision the editor read; omit it to overwrite whatever is there.
 #[tauri::command]
 pub async fn sftp_write_text_file(
     app: AppHandle,
@@ -772,9 +776,21 @@ pub async fn sftp_write_text_file(
     id: String,
     path: String,
     content: String,
-) -> Result<(), String> {
+    expected_revision: Option<String>,
+) -> AppResult<String> {
     let pool = pool.inner().clone();
-    run_blocking(move || write_text_file(&pool, &app, &id, &path, &content)).await
+    tauri::async_runtime::spawn_blocking(move || {
+        write_text_file(
+            &pool,
+            &app,
+            &id,
+            &path,
+            &content,
+            expected_revision.as_deref(),
+        )
+    })
+    .await
+    .map_err(|err| format!("后台任务失败：{err}"))?
 }
 
 #[tauri::command]

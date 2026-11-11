@@ -18,6 +18,10 @@ export interface FileEditorState {
   loading: boolean;
   saving: boolean;
   error?: string;
+  /** The remote revision the content was read from; saves are checked against it. */
+  revision?: string;
+  /** The last save was refused because the remote file changed meanwhile. */
+  conflict?: boolean;
 }
 
 /** Modal editor for small remote text files, with a syntax-highlight overlay. */
@@ -25,11 +29,14 @@ export function FileEditorModal({
   editor,
   onChange,
   onSave,
+  onOverwrite,
   onClose,
 }: {
   editor: FileEditorState;
   onChange: (content: string) => void;
   onSave: () => void;
+  /** Save even though the remote file changed since it was opened. */
+  onOverwrite: () => void;
   onClose: () => void;
 }) {
   const highlightRef = useRef<HTMLPreElement>(null);
@@ -207,6 +214,17 @@ export function FileEditorModal({
             <button type="button" className="btn-ghost" disabled={editor.saving} onClick={onClose}>
               取消
             </button>
+            {editor.conflict && (
+              <button
+                type="button"
+                className="btn-ghost"
+                disabled={editor.saving}
+                title="远程文件在打开后被修改过，覆盖会丢弃那些修改"
+                onClick={onOverwrite}
+              >
+                仍然覆盖
+              </button>
+            )}
             <button
               type="button"
               className="solid-button"
