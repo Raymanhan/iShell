@@ -137,6 +137,8 @@ export default function App() {
     setAutoCheckUpdates,
     autoHideTopBar,
     setAutoHideTopBar,
+    gpuRendering,
+    setGpuRendering,
   } = useAppSettings();
   const updater = useUpdater(autoCheckUpdates);
   const [tabs, setTabs] = useState<ShellTab[]>(() => handedOffInitialTab ? [handedOffInitialTab] : []);
@@ -1718,6 +1720,7 @@ export default function App() {
                             inputRegistry={paneInputsRef.current}
                             theme={theme}
                             fontSize={terminalFontSize}
+                            gpuRendering={gpuRendering}
                             layoutSignal={`${filesOpen}:${filesRatio}:${filesDragging}:${connectionsOpen}:${sidePanel}:${statusPanelWidth}:${tabs.length}`}
                             setNotice={showNotice}
                             onReady={() => handleTerminalReady(tab.id, tab.serverId, tab.title)}
@@ -1899,6 +1902,7 @@ export default function App() {
           terminalFontSize={terminalFontSize}
           tailViewerDefaultLines={tailViewerDefaultLines}
           autoHideTopBar={autoHideTopBar}
+          gpuRendering={gpuRendering}
           updater={updater.state}
           autoCheckUpdates={autoCheckUpdates}
           onThemeChange={setTheme}
@@ -1906,6 +1910,7 @@ export default function App() {
           onTerminalFontSizeChange={setTerminalFontSize}
           onTailViewerDefaultLinesChange={setTailViewerDefaultLines}
           onAutoHideTopBarChange={setAutoHideTopBar}
+          onGpuRenderingChange={setGpuRendering}
           onAutoCheckUpdatesChange={setAutoCheckUpdates}
           onCheckUpdates={() => void updater.checkForUpdate({ silent: false })}
           onInstallUpdate={() => void updater.installUpdate()}

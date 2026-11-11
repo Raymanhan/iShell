@@ -40,6 +40,7 @@ export function SettingsModal({
   terminalFontSize,
   tailViewerDefaultLines,
   autoHideTopBar,
+  gpuRendering,
   updater,
   autoCheckUpdates,
   onThemeChange,
@@ -47,6 +48,7 @@ export function SettingsModal({
   onTerminalFontSizeChange,
   onTailViewerDefaultLinesChange,
   onAutoHideTopBarChange,
+  onGpuRenderingChange,
   onAutoCheckUpdatesChange,
   onCheckUpdates,
   onInstallUpdate,
@@ -60,6 +62,7 @@ export function SettingsModal({
   terminalFontSize: number;
   tailViewerDefaultLines: number;
   autoHideTopBar: boolean;
+  gpuRendering: boolean;
   updater: UpdaterState;
   autoCheckUpdates: boolean;
   onThemeChange: (theme: AppTheme) => void;
@@ -67,6 +70,7 @@ export function SettingsModal({
   onTerminalFontSizeChange: (size: number) => void;
   onTailViewerDefaultLinesChange: (lines: number) => void;
   onAutoHideTopBarChange: (autoHide: boolean) => void;
+  onGpuRenderingChange: (enabled: boolean) => void;
   onAutoCheckUpdatesChange: (enabled: boolean) => void;
   onCheckUpdates: () => void;
   onInstallUpdate: () => void;
@@ -258,6 +262,18 @@ export function SettingsModal({
                       onChange={(event) => onTerminalFontSizeChange(Number(event.target.value))}
                     />
                     <strong>{terminalFontSize}px</strong>
+                  </label>
+
+                  <label className="settings-toggle">
+                    <span>
+                      GPU 加速渲染
+                      <small>用 WebGL 绘制终端，大量输出时更流畅；显示异常时可关闭。对新打开的终端生效。</small>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={gpuRendering}
+                      onChange={(event) => onGpuRenderingChange(event.target.checked)}
+                    />
                   </label>
                 </div>
 

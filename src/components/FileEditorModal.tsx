@@ -1,13 +1,9 @@
-import {
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  type PointerEvent as ReactPointerEvent,
-} from "react";
+import { useEffect, useRef } from "react";
 import { Save, X } from "lucide-react";
+import { createCodeEditor, loadLanguage } from "../features/editor/codeEditor";
+import { languageForFile } from "../features/editor/languages";
 import type { SftpEntry } from "../types";
 import { formatBytes } from "../utils/format";
-import { renderHighlightedCode, textOffsetAtPoint } from "../utils/highlight";
 
 export interface FileEditorState {
   entry: SftpEntry;
@@ -24,7 +20,7 @@ export interface FileEditorState {
   conflict?: boolean;
 }
 
-/** Modal editor for small remote text files, with a syntax-highlight overlay. */
+/** Modal editor for small remote text files. */
 export function FileEditorModal({
   editor,
   onChange,
@@ -39,135 +35,40 @@ export function FileEditorModal({
   onOverwrite: () => void;
   onClose: () => void;
 }) {
-  const highlightRef = useRef<HTMLPreElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const selectionCleanupRef = useRef<(() => void) | null>(null);
+  const hostRef = useRef<HTMLDivElement>(null);
+  const codeEditorRef = useRef<ReturnType<typeof createCodeEditor> | null>(null);
+  const handlers = useRef({ onChange, onSave });
+  handlers.current = { onChange, onSave };
 
-  useLayoutEffect(() => {
-    const highlight = highlightRef.current;
-    const textarea = textareaRef.current;
-    if (!highlight || !textarea) return;
-    highlight.scrollTop = textarea.scrollTop;
-    highlight.scrollLeft = textarea.scrollLeft;
-  }, [editor.entry.path, editor.content]);
-
-  useEffect(() => () => selectionCleanupRef.current?.(), []);
-
-  // A textarea stops extending the selection once the pointer leaves it. Keep
-  // scrolling and extending it while a drag-select goes past an edge.
-  function startSelectionDrag(event: ReactPointerEvent<HTMLTextAreaElement>) {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
-
-    const textarea = event.currentTarget;
-    const highlight = highlightRef.current;
-    if (!highlight) return;
-
-    selectionCleanupRef.current?.();
-
-    const pointerId = event.pointerId;
-    let pointerX = event.clientX;
-    let pointerY = event.clientY;
-    let selectionAnchor: number | null = null;
-    let frame = 0;
-
-    const syncHighlight = () => {
-      highlight.scrollTop = textarea.scrollTop;
-      highlight.scrollLeft = textarea.scrollLeft;
+  // The editor is created once the file has loaded, with its text.
+  const ready = !editor.loading && !(editor.error && !editor.originalContent && !editor.content);
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!ready || !host) return;
+    const codeEditor = createCodeEditor(host, {
+      content: editor.content,
+      readOnly: editor.saving,
+      onChange: (content) => handlers.current.onChange(content),
+      onSave: () => handlers.current.onSave(),
+    });
+    codeEditorRef.current = codeEditor;
+    codeEditor.view.focus();
+    let active = true;
+    loadLanguage(languageForFile(editor.entry.name, editor.entry.path))
+      .then((language) => active && codeEditor.setLanguage(language))
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      codeEditorRef.current = null;
+      codeEditor.destroy();
     };
-    const cleanup = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", cleanup);
-      window.removeEventListener("pointercancel", cleanup);
-      window.removeEventListener("blur", cleanup);
-      if (frame) window.cancelAnimationFrame(frame);
-      frame = 0;
-      if (selectionCleanupRef.current === cleanup) {
-        selectionCleanupRef.current = null;
-      }
-    };
-    const scrollSelection = () => {
-      frame = 0;
-      const rect = textarea.getBoundingClientRect();
-      const horizontalOverflow = pointerX < rect.left
-        ? pointerX - rect.left
-        : pointerX > rect.right
-          ? pointerX - rect.right
-          : 0;
-      const verticalOverflow = pointerY < rect.top
-        ? pointerY - rect.top
-        : pointerY > rect.bottom
-          ? pointerY - rect.bottom
-          : 0;
-      if (!horizontalOverflow && !verticalOverflow) return;
+    // Recreated only for another file; later text changes come from the editor itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, editor.entry.path, editor.tabId]);
 
-      const previousScrollLeft = textarea.scrollLeft;
-      const previousScrollTop = textarea.scrollTop;
-      if (horizontalOverflow) {
-        const horizontalSpeed = Math.sign(horizontalOverflow)
-          * Math.min(32, Math.max(4, Math.abs(horizontalOverflow) * 0.2));
-        textarea.scrollLeft += horizontalSpeed;
-      }
-      if (verticalOverflow) {
-        const verticalSpeed = Math.sign(verticalOverflow)
-          * Math.min(24, Math.max(4, Math.abs(verticalOverflow) * 0.2));
-        textarea.scrollTop += verticalSpeed;
-      }
-      const didScroll =
-        textarea.scrollLeft !== previousScrollLeft
-        || textarea.scrollTop !== previousScrollTop;
-      if (!didScroll) return;
-
-      syncHighlight();
-      if (selectionAnchor === null) {
-        selectionAnchor = textarea.selectionDirection === "backward"
-          ? textarea.selectionEnd
-          : textarea.selectionStart;
-      }
-
-      const offset = textOffsetAtPoint(
-        textarea,
-        highlight,
-        Math.min(rect.right - 12, Math.max(rect.left + 2, pointerX)),
-        Math.min(rect.bottom - 12, Math.max(rect.top + 2, pointerY)),
-      );
-      if (offset !== null) {
-        if (offset < selectionAnchor) {
-          textarea.setSelectionRange(offset, selectionAnchor, "backward");
-        } else {
-          textarea.setSelectionRange(selectionAnchor, offset, "forward");
-        }
-      }
-
-      frame = window.requestAnimationFrame(scrollSelection);
-    };
-    const onMove = (move: PointerEvent) => {
-      if (move.pointerId !== pointerId) return;
-      if (move.pointerType === "mouse" && (move.buttons & 1) === 0) {
-        cleanup();
-        return;
-      }
-      pointerX = move.clientX;
-      pointerY = move.clientY;
-      const rect = textarea.getBoundingClientRect();
-      if (
-        (
-          pointerX < rect.left
-          || pointerX > rect.right
-          || pointerY < rect.top
-          || pointerY > rect.bottom
-        )
-        && !frame
-      ) {
-        frame = window.requestAnimationFrame(scrollSelection);
-      }
-    };
-
-    window.addEventListener("pointermove", onMove, { passive: true });
-    window.addEventListener("pointerup", cleanup, { once: true });
-    window.addEventListener("pointercancel", cleanup, { once: true });
-    window.addEventListener("blur", cleanup, { once: true });
-    selectionCleanupRef.current = cleanup;
-  }
+  useEffect(() => {
+    codeEditorRef.current?.setReadOnly(editor.saving);
+  }, [editor.saving]);
 
   return (
     <div className="file-editor-backdrop" role="presentation">
@@ -183,30 +84,8 @@ export function FileEditorModal({
           </button>
         </header>
         {editor.error && <div className="file-editor-error">{editor.error}</div>}
-        <div className="file-editor-code">
-          <pre ref={highlightRef} className="file-editor-highlight" aria-hidden="true">{renderHighlightedCode(editor.entry.name, editor.content)}</pre>
-          <textarea
-            ref={textareaRef}
-            className="file-editor-textarea"
-            value={editor.content}
-            disabled={editor.loading || editor.saving}
-            spellCheck={false}
-            wrap="off"
-            onPointerDown={startSelectionDrag}
-            onScroll={(event) => {
-              const highlight = highlightRef.current;
-              if (!highlight) return;
-              highlight.scrollTop = event.currentTarget.scrollTop;
-              highlight.scrollLeft = event.currentTarget.scrollLeft;
-            }}
-            onChange={(event) => onChange(event.target.value)}
-            onKeyDown={(event) => {
-              if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
-                event.preventDefault();
-                onSave();
-              }
-            }}
-          />
+        <div className="file-editor-code" ref={hostRef} aria-busy={editor.loading}>
+          {editor.loading && <div className="file-editor-loading">读取中…</div>}
         </div>
         <footer className="file-editor-actions">
           <span>{editor.loading ? "读取中…" : `${formatBytes(new TextEncoder().encode(editor.content).length)} / 1 MB`}</span>

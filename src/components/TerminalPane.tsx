@@ -8,6 +8,7 @@ import { command, isTauri } from "../api/tauri";
 import { getTerminalSurfaceReport, getTerminalTheme, type AppTheme } from "../constants/theme";
 import { splitShortcutDirection, type PaneRect, type SplitDirection } from "../features/shell/panes";
 import { directoryLinkProvider } from "../features/shell/directoryLinks";
+import { enableUnicode11, enableWebglRenderer } from "../features/shell/renderer";
 import type { ShellTab } from "../features/shell/types";
 import { isTerminalSearchShortcut, TerminalSearchBar } from "./TerminalSearchBar";
 import {
@@ -55,6 +56,7 @@ function TerminalPaneBase({
   visible,
   theme,
   fontSize,
+  gpuRendering = true,
   layoutSignal,
   setNotice,
   onReady,
@@ -77,6 +79,8 @@ function TerminalPaneBase({
   visible: boolean;
   theme: AppTheme;
   fontSize: number;
+  /** Draw with WebGL; read when the terminal is created. */
+  gpuRendering?: boolean;
   layoutSignal: string;
   setNotice: (notice: string) => void;
   onReady?: () => void;
@@ -433,6 +437,7 @@ function TerminalPaneBase({
     const search = new SearchAddon();
     terminal.loadAddon(fit);
     terminal.loadAddon(search);
+    enableUnicode11(terminal);
     // The theme background is transparent, so xterm would answer a background
     // query (OSC 11 "?") with black and CLIs that adapt to it (Codex, Claude
     // Code, vim) would pick dark styling on light themes, e.g. dark ink on a
@@ -450,6 +455,9 @@ function TerminalPaneBase({
       return true;
     });
     terminal.open(containerRef.current);
+    const releaseWebgl = gpuRendering
+      ? enableWebglRenderer(terminal, (reason) => console.warn(`[iShell] ${reason}`))
+      : undefined;
     terminal.registerLinkProvider(directoryLinkProvider(
       terminal,
       (path) => onOpenDirectoryRef.current?.(path),
@@ -563,6 +571,7 @@ function TerminalPaneBase({
       if (fitSettledTimerRef.current !== null) window.clearTimeout(fitSettledTimerRef.current);
       observer.disconnect();
       setSearchAddon(null);
+      releaseWebgl?.();
       terminal.dispose();
     };
   }, [setNotice, tab.title]);

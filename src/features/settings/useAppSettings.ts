@@ -14,6 +14,7 @@ import { AUTO_CHECK_UPDATES_KEY, readAutoCheckUpdates } from "../updater/useUpda
 const THEME_KEY = "ishell.theme";
 const TERMINAL_FONT_SIZE_KEY = "ishell.terminalFontSize";
 const AUTO_HIDE_TOP_BAR_KEY = "ishell.autoHideTopBar";
+const GPU_RENDERING_KEY = "ishell.terminalGpuRendering";
 
 export const MIN_TERMINAL_FONT_SIZE = 11;
 export const MAX_TERMINAL_FONT_SIZE = 20;
@@ -62,6 +63,7 @@ export function useAppSettings() {
   const [autoHideTopBar, setAutoHideTopBar] = useState(
     () => load(AUTO_HIDE_TOP_BAR_KEY) !== "false",
   );
+  const [gpuRendering, setGpuRendering] = useState(() => load(GPU_RENDERING_KEY) !== "false");
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -80,6 +82,7 @@ export function useAppSettings() {
     [tailViewerDefaultLines],
   );
   useEffect(() => store(AUTO_HIDE_TOP_BAR_KEY, String(autoHideTopBar)), [autoHideTopBar]);
+  useEffect(() => store(GPU_RENDERING_KEY, String(gpuRendering)), [gpuRendering]);
   useEffect(() => store(AUTO_CHECK_UPDATES_KEY, String(autoCheckUpdates)), [autoCheckUpdates]);
 
   return {
@@ -95,5 +98,7 @@ export function useAppSettings() {
     setAutoCheckUpdates,
     autoHideTopBar,
     setAutoHideTopBar,
+    gpuRendering,
+    setGpuRendering,
   };
 }
