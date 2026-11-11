@@ -16,6 +16,12 @@ pub struct Model {
     pub name: String,
     pub reasoning_efforts: Vec<ReasoningEffort>,
     pub default_reasoning_effort: Option<String>,
+    /// Whether the model takes adaptive thinking (Anthropic); unknown elsewhere.
+    #[serde(default)]
+    pub adaptive_thinking: Option<bool>,
+    /// The model's output cap, where the service reports it.
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
 }
 
 fn text_at<'a>(value: &'a Value, paths: &[&str]) -> Option<&'a str> {
@@ -112,6 +118,8 @@ pub fn model(value: &Value) -> Option<Model> {
         name,
         reasoning_efforts,
         default_reasoning_effort,
+        adaptive_thinking: None,
+        max_output_tokens: None,
     })
 }
 

@@ -11,7 +11,11 @@ use std::{
 };
 use tauri::ipc::Channel;
 
-use super::{config::Config, metadata, Event};
+use super::{
+    anthropic,
+    config::{Config, PROVIDER_ANTHROPIC},
+    metadata, Event,
+};
 
 pub fn client() -> Result<Client, String> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -39,7 +43,7 @@ pub async fn cancellable<T>(
     }
 }
 
-async fn checked(
+pub(super) async fn checked(
     response: Response,
     config: &Config,
     cancel: Option<&AtomicBool>,
@@ -79,6 +83,9 @@ pub async fn models_cancellable(
     config: &Config,
     cancel: Option<&AtomicBool>,
 ) -> Result<Vec<metadata::Model>, String> {
+    if config.provider == PROVIDER_ANTHROPIC {
+        return anthropic::models(config, cancel).await;
+    }
     let client = client()?;
     let mut request = client
         .get(format!("{}/models", config.base_url))
@@ -206,6 +213,56 @@ impl Accumulator {
     }
 }
 
+/// One model turn, whichever API the configured service speaks.
+pub type ChatRequest<'a> = anthropic::Request<'a>;
+
+pub async fn chat(
+    config: &Config,
+    request: &ChatRequest<'_>,
+    cancel: Arc<AtomicBool>,
+    events: &Channel<Event>,
+) -> Result<Value, String> {
+    if config.provider == PROVIDER_ANTHROPIC {
+        return anthropic::completion(config, request, cancel, events).await;
+    }
+    let mut messages = vec![json!({"role": "system", "content": request.system})];
+    messages.extend(openai_messages(request.messages));
+    let mut body = json!({"model": request.model, "messages": messages, "stream": true});
+    if let Some(tools) = request.tools {
+        body["tools"] = tools.clone();
+        body["tool_choice"] = json!("auto");
+    }
+    if let Some(effort) = request.effort {
+        body["reasoning_effort"] = json!(effort);
+    }
+    completion(config, body, cancel, events).await
+}
+
+/// The app's messages for a Chat Completions API: a user turn's context
+/// note goes in front of its text, and Anthropic-only blocks are left out.
+pub fn openai_messages(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|message| {
+            let mut message = message.clone();
+            if let Some(object) = message.as_object_mut() {
+                object.remove(anthropic::CONTENT_KEY);
+                if let Some(context) = object.remove("context") {
+                    let context = context.as_str().unwrap_or_default();
+                    let text = object
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if !context.is_empty() {
+                        object.insert("content".into(), json!(format!("{context}\n\n{text}")));
+                    }
+                }
+            }
+            message
+        })
+        .collect()
+}
+
 pub async fn completion(
     config: &Config,
     body: Value,
@@ -287,6 +344,23 @@ mod tests {
         .unwrap();
         assert!(acc.finish().is_err());
     }
+    #[test]
+    fn chat_completions_get_the_context_note_and_no_anthropic_blocks() {
+        let messages = [
+            json!({"role": "user", "content": "检查", "context": "当前权限模式：auto"}),
+            json!({"role": "assistant", "content": "好", anthropic::CONTENT_KEY: [{"type": "text", "text": "好"}]}),
+            json!({"role": "user", "content": "继续"}),
+        ];
+        assert_eq!(
+            openai_messages(&messages),
+            [
+                json!({"role": "user", "content": "当前权限模式：auto\n\n检查"}),
+                json!({"role": "assistant", "content": "好"}),
+                json!({"role": "user", "content": "继续"}),
+            ]
+        );
+    }
+
     #[test]
     fn truncation_and_api_errors_never_become_commands() {
         let mut acc = Accumulator::default();

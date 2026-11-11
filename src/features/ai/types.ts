@@ -1,4 +1,11 @@
+/** Which API the model service speaks. */
+export type AiProvider = "openai" | "anthropic";
+export const AI_PROVIDER_DEFAULT_URLS: Record<AiProvider, string> = {
+  openai: "https://api.openai.com/v1",
+  anthropic: "https://api.anthropic.com",
+};
 export interface AiConfig {
+  provider: AiProvider;
   baseUrl: string;
   models: string[];
   manualModels: string[];
@@ -9,6 +16,7 @@ export interface AiConfig {
   defaultPermission: AiPermission;
 }
 export interface AiConfigInput {
+  provider: AiProvider;
   baseUrl: string;
   models: string[];
   manualModels: string[];
@@ -176,6 +184,7 @@ export interface AiEvent {
   afterTokens?: number;
 }
 export const defaultAiConfig: AiConfig = {
+  provider: "openai",
   baseUrl: "https://api.openai.com/v1",
   models: [],
   manualModels: [],

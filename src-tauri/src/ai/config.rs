@@ -8,6 +8,8 @@ use crate::store::{decrypt_secret, encrypt_secret, open_db};
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
+    /// `openai` (any OpenAI-compatible Chat Completions API) or `anthropic`.
+    pub provider: String,
     pub base_url: String,
     pub models: Vec<String>,
     pub manual_models: Vec<String>,
@@ -20,6 +22,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            provider: PROVIDER_OPENAI.into(),
             base_url: "https://api.openai.com/v1".into(),
             models: vec![],
             manual_models: vec![],
@@ -34,6 +37,7 @@ impl Default for Config {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicConfig {
+    pub provider: String,
     pub base_url: String,
     pub models: Vec<String>,
     pub manual_models: Vec<String>,
@@ -47,6 +51,7 @@ pub struct PublicConfig {
 impl From<&Config> for PublicConfig {
     fn from(value: &Config) -> Self {
         Self {
+            provider: value.provider.clone(),
             base_url: value.base_url.clone(),
             models: value.models.clone(),
             manual_models: value.manual_models.clone(),
@@ -62,6 +67,8 @@ impl From<&Config> for PublicConfig {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigInput {
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub base_url: String,
     #[serde(default)]
     pub models: Vec<String>,
@@ -76,6 +83,12 @@ pub struct ConfigInput {
 fn default_permission() -> String {
     "auto".into()
 }
+fn default_provider() -> String {
+    PROVIDER_OPENAI.into()
+}
+
+pub const PROVIDER_OPENAI: &str = "openai";
+pub const PROVIDER_ANTHROPIC: &str = "anthropic";
 
 pub fn normalize_url(raw: &str) -> Result<String, String> {
     let mut url = Url::parse(raw.trim()).map_err(|_| "请输入完整的模型 API 地址".to_string())?;
@@ -161,8 +174,27 @@ pub fn merge(old: Config, input: ConfigInput) -> Result<Config, String> {
     if api_key.len() > 4096 || api_key.contains(['\r', '\n']) {
         return Err("API 密钥格式无效".into());
     }
+    if !matches!(
+        input.provider.as_str(),
+        PROVIDER_OPENAI | PROVIDER_ANTHROPIC
+    ) {
+        return Err("模型服务类型无效".into());
+    }
+    let base_url = normalize_url(&input.base_url)?;
+    let base_url = if input.provider == PROVIDER_ANTHROPIC {
+        // Requests go to `<base>/v1/messages`; keep the bare origin.
+        let trimmed = base_url.trim_end_matches('/');
+        trimmed
+            .strip_suffix("/v1/messages")
+            .or_else(|| trimmed.strip_suffix("/v1"))
+            .unwrap_or(trimmed)
+            .to_string()
+    } else {
+        base_url
+    };
     Ok(Config {
-        base_url: normalize_url(&input.base_url)?,
+        provider: input.provider,
+        base_url,
         models,
         manual_models,
         model_metadata: vec![],
@@ -239,6 +271,29 @@ mod tests {
         assert_eq!(config.default_model, "private-model");
     }
     #[test]
+    fn anthropic_endpoints_keep_the_bare_origin() {
+        let input = |url: &str, provider: &str| ConfigInput {
+            provider: provider.into(),
+            base_url: url.into(),
+            models: vec![],
+            manual_models: vec![],
+            default_model: String::new(),
+            api_key: None,
+            default_permission: "auto".into(),
+        };
+        for url in [
+            "https://api.anthropic.com",
+            "https://api.anthropic.com/v1",
+            "https://api.anthropic.com/v1/messages/",
+        ] {
+            let config = merge(Config::default(), input(url, PROVIDER_ANTHROPIC)).unwrap();
+            assert_eq!(config.base_url, "https://api.anthropic.com", "{url}");
+            assert_eq!(config.provider, PROVIDER_ANTHROPIC);
+        }
+        assert!(merge(Config::default(), input("https://x.dev", "gemini")).is_err());
+    }
+
+    #[test]
     fn endpoint_normalization() {
         assert_eq!(
             normalize_url(" https://example.com/v1/chat/completions/ ").unwrap(),
@@ -264,6 +319,7 @@ mod tests {
             ..Config::default()
         };
         let input = |key| ConfigInput {
+            provider: PROVIDER_OPENAI.into(),
             base_url: "https://example.com/v1".into(),
             models: vec![" a ".into(), "a".into()],
             manual_models: vec![],

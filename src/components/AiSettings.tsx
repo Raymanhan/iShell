@@ -8,6 +8,8 @@ import {
   type AiPermission,
   type AiModel,
   mergeModelSources,
+  AI_PROVIDER_DEFAULT_URLS,
+  type AiProvider,
 } from "../features/ai/types";
 
 export function AiSettings({
@@ -17,6 +19,7 @@ export function AiSettings({
   config: AiConfig;
   onSaved: (config: AiConfig) => void;
 }) {
+  const [provider, setProvider] = useState<AiProvider>(config.provider || "openai");
   const [baseUrl, setBaseUrl] = useState(config.baseUrl);
   const [apiKey, setApiKey] = useState("");
   const [clearKey, setClearKey] = useState(false);
@@ -51,6 +54,7 @@ export function AiSettings({
   }
   function input(): AiConfigInput {
     return {
+      provider,
       baseUrl,
       apiKey: clearKey ? "" : apiKey.trim() || null,
       models: modelList,
@@ -72,6 +76,7 @@ export function AiSettings({
         input: input(),
       });
       onSaved(value);
+      setProvider(value.provider || "openai");
       setBaseUrl(value.baseUrl);
       setApiKey("");
       setClearKey(false);
@@ -121,6 +126,24 @@ export function AiSettings({
       </div>
       <fieldset disabled={Boolean(busy)}>
         <label>
+          服务类型
+          <select
+            value={provider}
+            onChange={(e) => {
+              const next = e.target.value as AiProvider;
+              // Keep a custom address; swap only the other service's default.
+              if (!baseUrl.trim() || baseUrl === AI_PROVIDER_DEFAULT_URLS[provider]) {
+                setBaseUrl(AI_PROVIDER_DEFAULT_URLS[next]);
+              }
+              setProvider(next);
+              invalidateMetadata();
+            }}
+          >
+            <option value="openai">OpenAI 兼容（Chat Completions）</option>
+            <option value="anthropic">Anthropic（Claude Messages API）</option>
+          </select>
+        </label>
+        <label>
           API 地址
           <input
             value={baseUrl}
@@ -128,12 +151,14 @@ export function AiSettings({
               setBaseUrl(e.target.value);
               invalidateMetadata();
             }}
-            placeholder="https://api.openai.com/v1"
+            placeholder={AI_PROVIDER_DEFAULT_URLS[provider]}
             spellCheck={false}
           />
         </label>
         <small>
-          填写包含 /v1 的服务根地址，也支持粘贴完整 /chat/completions 地址。
+          {provider === "anthropic"
+            ? "Claude 官方接口为 https://api.anthropic.com；思考过程以摘要显示，模型拒绝时会自动转由推荐的备用模型继续。"
+            : "填写包含 /v1 的服务根地址，也支持粘贴完整 /chat/completions 地址。"}
         </small>
         <label>
           API 密钥
@@ -149,7 +174,9 @@ export function AiSettings({
             placeholder={
               config.hasApiKey
                 ? "已保存，留空保留原密钥"
-                : "sk-…（本地服务可留空）"
+                : provider === "anthropic"
+                  ? "sk-ant-…"
+                  : "sk-…（本地服务可留空）"
             }
           />
         </label>
