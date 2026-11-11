@@ -124,6 +124,8 @@ function TerminalPaneBase({
   const readySessionRef = useRef<string | null>(null);
   // Decoded output per session; survives re-attaching, so nothing repeats.
   const outputsRef = useRef<Record<string, TerminalOutput>>({});
+  const encodingRef = useRef(tab.encoding ?? "UTF-8");
+  encodingRef.current = tab.encoding ?? "UTF-8";
   const connectingNoticeRef = useRef(false);
   const fitTimerRef = useRef<number | null>(null);
   const fitSettledTimerRef = useRef<number | null>(null);
@@ -182,12 +184,24 @@ function TerminalPaneBase({
   }
 
   function writeTerminalBytes(sessionId: string, offset: number, bytes: Uint8Array) {
-    const output = (outputsRef.current[sessionId] ??= new TerminalOutput());
+    const output = (outputsRef.current[sessionId] ??= new TerminalOutput(encodingRef.current));
     const text = output.push(offset, bytes);
     if (!text) return;
     terminalRef.current?.write(text);
     trackSensitivePrompt(text);
   }
+
+  /** Decode the session's further output with `encoding`. */
+  function switchDecoder(sessionId: string, encoding: string) {
+    const output = outputsRef.current[sessionId];
+    if (!output) return;
+    const rest = output.setEncoding(encoding);
+    if (rest) terminalRef.current?.write(rest);
+  }
+
+  useEffect(() => {
+    if (tab.sessionId) switchDecoder(tab.sessionId, tab.encoding ?? "UTF-8");
+  }, [tab.encoding, tab.sessionId]);
 
   function showClosed(sessionId: string, reason: string) {
     if (closedSessionRef.current === sessionId) return;
@@ -707,9 +721,13 @@ function TerminalPaneBase({
       else if (frame.kind === FRAME_CLOSED)
         showClosed(sessionId, new TextDecoder().decode(frame.payload));
     };
-    command("attach_terminal", { sessionId, onOutput: channel }).catch((error) => {
-      if (active) setNotice(String(error));
-    });
+    command("attach_terminal", { sessionId, onOutput: channel })
+      .then((encoding) => {
+        if (active) switchDecoder(sessionId, encoding);
+      })
+      .catch((error) => {
+        if (active) setNotice(String(error));
+      });
     return () => {
       active = false;
       void command("detach_terminal", { sessionId, channelId: channel.id }).catch(() => undefined);

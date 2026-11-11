@@ -117,6 +117,7 @@ export function useConnections({
       color: server.color || swatches[0],
       notes: server.notes,
       jumpServerId: server.jumpServerId ?? null,
+      encoding: server.encoding ?? "UTF-8",
       password: "",
     });
     setEditing(true);
@@ -138,6 +139,7 @@ export function useConnections({
       color: server.color || swatches[0],
       notes: server.notes,
       jumpServerId: server.jumpServerId ?? null,
+      encoding: server.encoding ?? "UTF-8",
       password: "",
     });
     setEditing(true);
@@ -349,6 +351,7 @@ export function useConnections({
         const saved: ServerRecord = {
           ...input,
           id: input.id || crypto.randomUUID(),
+          encoding: input.encoding ?? "UTF-8",
           sortOrder: servers.length,
           createdAt: Date.now() / 1000,
           updatedAt: Date.now() / 1000,

@@ -25,6 +25,7 @@ pub fn test_connection(
         jump_server_id: input
             .jump_server_id
             .filter(|jump_id| !jump_id.trim().is_empty()),
+        encoding: crate::encoding::DEFAULT.into(),
         sort_order: input.sort_order.unwrap_or_else(now),
         created_at: now(),
         updated_at: now(),

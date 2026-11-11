@@ -45,6 +45,7 @@ tauri-plugin-process = "2"
 keyring = "4"
 russh-sftp = "3"
 futures-util = "0.3"
+encoding_rs = "0.8"
 
 [features]
 # Force the russh transport on a non-Windows host (for development/testing).

@@ -14,6 +14,8 @@ export interface ServerRecord {
   notes: string;
   /** Another saved server to connect through (jump host), if any. */
   jumpServerId?: string | null;
+  /** The terminal's character encoding, e.g. "UTF-8" or "GBK". */
+  encoding?: string;
   sortOrder: number;
   createdAt: number;
   updatedAt: number;
@@ -33,6 +35,7 @@ export interface ServerInput {
   color: string;
   notes: string;
   jumpServerId?: string | null;
+  encoding?: string | null;
   sortOrder?: number | null;
 }
 

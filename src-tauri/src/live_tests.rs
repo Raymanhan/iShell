@@ -67,6 +67,7 @@ fn server(id: &str, live: &Live, port: u16, user: &str, auth: &str) -> ServerRec
         color: String::new(),
         notes: String::new(),
         jump_server_id: None,
+        encoding: "UTF-8".into(),
         sort_order: 0,
         created_at: 0,
         updated_at: 0,
@@ -569,6 +570,25 @@ fn terminal_session(app: &AppHandle, id: &str) {
         0,
         "the description line was cleared"
     );
+
+    // Switched to GBK: typed text reaches the remote side as GBK bytes, and
+    // GBK output reads back as text.
+    assert_eq!(
+        terminal::set_encoding(&registry, &session, "gbk").unwrap(),
+        "GBK"
+    );
+    terminal::terminal_type(
+        &registry,
+        &session,
+        "printf 中 | od -An -tx1; printf '\\304\\343\\272\\303-gbk\\n'\r",
+    )
+    .unwrap();
+    wait("GBK input and output", &|| {
+        registry
+            .recent_text(&session, 6)
+            .is_some_and(|text| text.contains("d6 d0") && text.contains("你好-gbk"))
+    });
+    terminal::set_encoding(&registry, &session, "utf-8").unwrap();
 
     terminal::terminal_resize(&registry, &session, 100, 30).unwrap();
     terminal::terminal_input(&registry, &session, b"stty size; exit\n".to_vec()).unwrap();

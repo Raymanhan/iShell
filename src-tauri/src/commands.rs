@@ -178,6 +178,7 @@ fn server_record_to_input(server: ServerRecord) -> ServerInput {
         color: server.color,
         notes: server.notes,
         jump_server_id: server.jump_server_id,
+        encoding: Some(server.encoding),
         sort_order: Some(server.sort_order),
     }
 }
@@ -282,6 +283,13 @@ pub fn save_server(
         jump_server_id: input
             .jump_server_id
             .filter(|jump_id| !jump_id.trim().is_empty()),
+        encoding: match input.encoding.as_deref() {
+            Some(label) => crate::encoding::normalize(label)?,
+            None => current
+                .as_ref()
+                .map(|server| server.encoding.clone())
+                .unwrap_or_else(|| crate::encoding::DEFAULT.into()),
+        },
         sort_order: input
             .sort_order
             .or_else(|| current.as_ref().map(|server| server.sort_order))
@@ -811,7 +819,7 @@ pub fn attach_terminal(
     registry: State<'_, Arc<TerminalRegistry>>,
     session_id: String,
     on_output: Channel,
-) -> Result<(), String> {
+) -> Result<String, String> {
     terminal::attach_terminal(registry.inner(), &session_id, on_output)
 }
 
@@ -830,7 +838,7 @@ pub fn terminal_input(
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    terminal::terminal_input(registry.inner(), &session_id, data.into_bytes())
+    terminal::terminal_type(registry.inner(), &session_id, &data)
 }
 
 #[tauri::command]
@@ -841,6 +849,16 @@ pub fn terminal_resize(
     rows: u16,
 ) -> Result<(), String> {
     terminal::terminal_resize(registry.inner(), &session_id, cols, rows)
+}
+
+/// Switch a running session's encoding, e.g. after seeing garbled output.
+#[tauri::command]
+pub fn terminal_set_encoding(
+    registry: State<'_, Arc<TerminalRegistry>>,
+    session_id: String,
+    encoding: String,
+) -> Result<String, String> {
+    terminal::set_encoding(registry.inner(), &session_id, &encoding)
 }
 
 #[tauri::command]

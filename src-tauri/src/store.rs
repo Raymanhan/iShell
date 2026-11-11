@@ -25,8 +25,11 @@ pub const MAX_JUMP_HOPS: usize = 3;
 /// Schema migrations, applied in order inside one transaction each. The
 /// database's `user_version` is the number of migrations it has had. Never
 /// edit a released migration: add a new one.
-const MIGRATIONS: &[fn(&Transaction) -> rusqlite::Result<()>] =
-    &[migration_baseline, migration_history_scopes];
+const MIGRATIONS: &[fn(&Transaction) -> rusqlite::Result<()>] = &[
+    migration_baseline,
+    migration_history_scopes,
+    migration_terminal_encoding,
+];
 
 /// Everything created before migrations were versioned. Databases from those
 /// versions already have some or all of it, hence `IF NOT EXISTS` and the
@@ -114,6 +117,11 @@ fn migration_history_scopes(tx: &Transaction) -> rusqlite::Result<()> {
     )
 }
 
+/// Each server's terminal character encoding.
+fn migration_terminal_encoding(tx: &Transaction) -> rusqlite::Result<()> {
+    add_column(tx, "servers", "encoding", "TEXT NOT NULL DEFAULT 'UTF-8'")
+}
+
 /// Add a column unless the table already has it.
 fn add_column(
     tx: &Transaction,
@@ -156,7 +164,7 @@ fn prepare(conn: &mut Connection) -> rusqlite::Result<()> {
 
 const FORWARD_COLUMNS: &str = "id, server_id, kind, bind_host, bind_port, dest_host, dest_port, description, auto_start, created_at, updated_at";
 
-const COLUMNS: &str = "id,name,host,port,username,\"group\",tags,auth_type,key_path,color,notes,created_at,updated_at,last_connected_at,sort_order,jump_server_id";
+const COLUMNS: &str = "id,name,host,port,username,\"group\",tags,auth_type,key_path,color,notes,created_at,updated_at,last_connected_at,sort_order,jump_server_id,encoding";
 
 pub fn list_servers(app: &AppHandle) -> Result<Vec<ServerRecord>, String> {
     let conn = open_db(app)?;
@@ -199,7 +207,7 @@ pub fn upsert_server(
     conn.execute(
         &format!(
             "INSERT INTO servers ({COLUMNS}, secret)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16, NULL)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17, NULL)
              ON CONFLICT(id) DO UPDATE SET
                name=excluded.name, host=excluded.host, port=excluded.port,
                username=excluded.username, \"group\"=excluded.\"group\",
@@ -208,7 +216,8 @@ pub fn upsert_server(
                notes=excluded.notes, updated_at=excluded.updated_at,
                last_connected_at=excluded.last_connected_at,
                sort_order=excluded.sort_order,
-               jump_server_id=excluded.jump_server_id"
+               jump_server_id=excluded.jump_server_id,
+               encoding=excluded.encoding"
         ),
         params![
             record.id,
@@ -227,6 +236,7 @@ pub fn upsert_server(
             record.last_connected_at.map(|value| value as i64),
             record.sort_order as i64,
             record.jump_server_id,
+            record.encoding,
         ],
     )
     .map_err(db_err)?;
@@ -703,6 +713,7 @@ fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<ServerRecord> {
         last_connected_at: row.get::<_, Option<i64>>(13)?.map(|value| value as u64),
         sort_order: row.get::<_, i64>(14)? as u64,
         jump_server_id: row.get(15)?,
+        encoding: row.get(16)?,
     })
 }
 
@@ -755,7 +766,7 @@ fn migrate_legacy_json(app: &AppHandle, conn: &Connection) -> Result<(), String>
         let _ = conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO servers ({COLUMNS}, secret)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16, NULL)"
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17, NULL)"
             ),
             params![
                 record.id,
@@ -774,6 +785,7 @@ fn migrate_legacy_json(app: &AppHandle, conn: &Connection) -> Result<(), String>
                 record.last_connected_at.map(|value| value as i64),
                 record.sort_order as i64,
                 record.jump_server_id,
+                record.encoding,
             ],
         );
     }

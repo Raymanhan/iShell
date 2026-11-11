@@ -101,6 +101,21 @@
 .ctx-menu button svg {
   flex: 0 0 auto;
 }
+.tab-context-menu .ctx-value {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+.tab-context-menu button.ctx-sub {
+  height: 26px;
+  padding-left: 18px;
+  font-size: 12px;
+}
+.tab-context-menu .ctx-check-space {
+  display: inline-block;
+  width: 13px;
+  flex: none;
+}
 .server-context-menu .ctx-sep,
 .tab-context-menu .ctx-sep,
 .ctx-menu .ctx-sep {
@@ -2174,4 +2189,9 @@
 }
 .forward-toggle.on span {
   transform: translateX(12px);
+}
+
+.tab-context-menu {
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
 }

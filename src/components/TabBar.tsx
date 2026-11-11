@@ -6,7 +6,8 @@ import {
   type MouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { Activity, Clock3, Columns2, Copy, FolderTree, Network, PanelLeft, PanelsTopLeft, Plus, Radio, RefreshCw, Rows2, Settings, Sparkles, SquareCode, X } from "lucide-react";
+import { Activity, Check, Clock3, Columns2, Copy, FolderTree, Languages, Network, PanelLeft, PanelsTopLeft, Plus, Radio, RefreshCw, Rows2, Settings, Sparkles, SquareCode, X } from "lucide-react";
+import { TERMINAL_ENCODINGS } from "../features/shell/encodings";
 import { manageNativeDragGhost } from "../features/shell/nativeDragGhost";
 import { MAX_PANES, splitShortcutLabel, type SplitDirection } from "../features/shell/panes";
 import type { ShellTab, SidePanel } from "../features/shell/types";
@@ -48,6 +49,7 @@ export function TabBar({
   onActivate,
   onClone,
   onReconnect,
+  onSetEncoding,
   onDetach,
   onSplit,
   paneCounts,
@@ -73,6 +75,7 @@ export function TabBar({
   onActivate: (id: string) => void;
   onClone: (id: string) => void;
   onReconnect: (id: string) => void;
+  onSetEncoding: (id: string, encoding: string) => void;
   onDetach: (id: string, dropPoint?: TabDropPoint) => void;
   onSplit: (id: string, direction: SplitDirection) => void;
   /** Number of panes in each split tab; tabs that are not split are absent. */
@@ -105,8 +108,11 @@ export function TabBar({
   const tabDragCleanupRef = useRef<(() => void) | null>(null);
   const suppressTabClickRef = useRef(false);
   const [menu, setMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
+  const [encodingMenuOpen, setEncodingMenuOpen] = useState(false);
+  useEffect(() => setEncodingMenuOpen(false), [menu]);
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
   const menuIndex = menu ? tabs.findIndex((tab) => tab.id === menu.tabId) : -1;
+  const menuTab = menuIndex >= 0 ? tabs[menuIndex] : null;
   const leftTabIds = menuIndex > 0 ? tabs.slice(0, menuIndex).map((tab) => tab.id) : [];
   const rightTabIds = menuIndex >= 0 ? tabs.slice(menuIndex + 1).map((tab) => tab.id) : [];
 
@@ -645,6 +651,30 @@ export function TabBar({
             <RefreshCw size={14} />
             重连
           </button>
+          <button
+            type="button"
+            role="menuitem"
+            aria-expanded={encodingMenuOpen}
+            onClick={() => setEncodingMenuOpen((open) => !open)}
+          >
+            <Languages size={14} />
+            终端编码
+            <span className="ctx-value">{menuTab?.encoding ?? "UTF-8"}</span>
+          </button>
+          {encodingMenuOpen &&
+            TERMINAL_ENCODINGS.map((item) => (
+              <button
+                key={item.value}
+                type="button"
+                role="menuitemradio"
+                aria-checked={(menuTab?.encoding ?? "UTF-8").toLowerCase() === item.value.toLowerCase()}
+                className="ctx-sub"
+                onClick={() => runMenu(() => onSetEncoding(menu.tabId, item.value))}
+              >
+                {(menuTab?.encoding ?? "UTF-8").toLowerCase() === item.value.toLowerCase() ? <Check size={13} /> : <span className="ctx-check-space" />}
+                {item.label}
+              </button>
+            ))}
           <div className="ctx-sep" role="separator" />
           <button
             type="button"

@@ -1,5 +1,6 @@
 mod ai;
 mod commands;
+mod encoding;
 mod error;
 #[cfg(test)]
 mod live_tests;
@@ -107,6 +108,7 @@ pub fn run() {
             commands::detach_terminal,
             commands::terminal_input,
             commands::terminal_resize,
+            commands::terminal_set_encoding,
             commands::close_terminal
         ])
         .build(tauri::generate_context!())

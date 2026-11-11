@@ -1,8 +1,9 @@
 //! Interactive terminal sessions.
 //!
 //! A session's output is kept as raw bytes: the remote side decides the
-//! encoding and the frontend decodes it (UTF-8 by default, or whatever the
-//! user picked), so nothing is lost or replaced on the way. Each pane showing
+//! encoding and the frontend decodes it with the session's encoding (the
+//! server's setting, UTF-8 by default, switchable while it runs), so nothing
+//! is lost or replaced on the way. Typed text is encoded the same way. Each pane showing
 //! a session subscribes with its own IPC channel and receives binary frames;
 //! attaching replays the buffered output and subscribes in one step, so no
 //! output can fall between the two.
@@ -24,6 +25,7 @@ use std::{
     time::Duration,
 };
 
+use encoding_rs::Encoding;
 #[cfg(not(russh_backend))]
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::{
@@ -31,6 +33,8 @@ use tauri::{
     AppHandle,
 };
 use uuid::Uuid;
+
+use crate::encoding;
 
 #[cfg(not(russh_backend))]
 use crate::models::ServerRecord;
@@ -68,6 +72,7 @@ fn frame(kind: u8, offset: u64, payload: &[u8]) -> InvokeResponseBody {
 struct Session {
     server_id: String,
     control: mpsc::Sender<TerminalControl>,
+    encoding: &'static Encoding,
     /// The most recent output; `start` is its offset in the whole output.
     buffer: Vec<u8>,
     start: u64,
@@ -145,19 +150,14 @@ impl TerminalRegistry {
         .unwrap_or(false)
     }
 
-    /// The last `max_bytes` of a session's output.
-    pub(crate) fn recent_output(&self, session_id: &str, max_bytes: usize) -> Option<Vec<u8>> {
-        self.with_session(session_id, |session| {
-            let skip = session.buffer.len().saturating_sub(max_bytes);
-            session.buffer[skip..].to_vec()
-        })
-    }
-
     /// The last `lines` lines of a session's output as plain text, for the
     /// AI: escape sequences removed, overwritten line content resolved.
     pub(crate) fn recent_text(&self, session_id: &str, lines: usize) -> Option<String> {
-        let bytes = self.recent_output(session_id, 256 * 1024)?;
-        Some(plain_lines(&String::from_utf8_lossy(&bytes), lines))
+        let (bytes, encoding) = self.with_session(session_id, |session| {
+            let skip = session.buffer.len().saturating_sub(256 * 1024);
+            (session.buffer[skip..].to_vec(), session.encoding)
+        })?;
+        Some(plain_lines(&encoding::decode(encoding, &bytes), lines))
     }
 
     fn output(&self, session_id: &str, data: &[u8]) {
@@ -207,11 +207,15 @@ pub fn open_terminal(
 ) -> Result<String, String> {
     let session_id = Uuid::new_v4().to_string();
     let (sender, receiver) = mpsc::channel::<TerminalControl>();
+    let session_encoding = get_server(&app, &server_id)
+        .map(|server| encoding::lookup(&server.encoding))
+        .unwrap_or(encoding_rs::UTF_8);
     lock(&registry.sessions).insert(
         session_id.clone(),
         Arc::new(Mutex::new(Session {
             server_id: server_id.clone(),
             control: sender,
+            encoding: session_encoding,
             buffer: Vec::new(),
             start: 0,
             ready: false,
@@ -238,11 +242,12 @@ pub fn open_terminal(
 }
 
 /// Subscribe `channel` to a session, first replaying its buffered output.
+/// Returns the encoding to decode the output with.
 pub fn attach_terminal(
     registry: &TerminalRegistry,
     session_id: &str,
     channel: Channel,
-) -> Result<(), String> {
+) -> Result<String, String> {
     registry
         .with_session(session_id, |session| {
             session.replay(&channel)?;
@@ -250,7 +255,7 @@ pub fn attach_terminal(
                 session.subscribers.remove(0);
             }
             session.subscribers.push(channel);
-            Ok(())
+            Ok(session.encoding.name().to_string())
         })
         .unwrap_or_else(|| Err("找不到终端会话".to_string()))
 }
@@ -264,12 +269,41 @@ pub fn detach_terminal(registry: &TerminalRegistry, session_id: &str, channel_id
     });
 }
 
+/// Raw bytes for the remote side, sent as they are (file transfers, tests).
 pub fn terminal_input(
     registry: &TerminalRegistry,
     session_id: &str,
     data: Vec<u8>,
 ) -> Result<(), String> {
     registry.send(session_id, TerminalControl::Input(data))
+}
+
+/// Typed text, encoded with the session's encoding.
+pub fn terminal_type(
+    registry: &TerminalRegistry,
+    session_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let encoding = registry
+        .with_session(session_id, |session| session.encoding)
+        .ok_or_else(|| "找不到终端会话".to_string())?;
+    terminal_input(registry, session_id, encoding::encode(encoding, text))
+}
+
+/// Decode and encode a running session with another encoding. Returns the
+/// encoding's canonical name.
+pub fn set_encoding(
+    registry: &TerminalRegistry,
+    session_id: &str,
+    label: &str,
+) -> Result<String, String> {
+    let name = encoding::normalize(label)?;
+    registry
+        .with_session(session_id, |session| {
+            session.encoding = encoding::lookup(&name)
+        })
+        .ok_or_else(|| "找不到终端会话".to_string())?;
+    Ok(name)
 }
 
 pub fn terminal_resize(
@@ -755,6 +789,7 @@ mod tests {
             Arc::new(Mutex::new(Session {
                 server_id: "server".into(),
                 control,
+                encoding: encoding_rs::UTF_8,
                 buffer: Vec::new(),
                 start: 0,
                 ready: false,
@@ -822,11 +857,43 @@ mod tests {
             .unwrap();
         assert!(len <= MAX_BUFFER_BYTES);
         assert_eq!(start + len as u64, 10 * 64 * 1024);
-        assert_eq!(registry.recent_output(&id, 3).unwrap(), b"xxx");
+        assert!(registry
+            .with_session(&id, |session| session.buffer.ends_with(b"xxx"))
+            .unwrap());
 
         let (late, frames) = recording_channel();
         attach_terminal(&registry, &id, late).unwrap();
         assert_eq!(decode(&frames.lock().unwrap()[0]).1, start);
+    }
+
+    #[test]
+    fn a_session_switches_encoding_for_input_and_output() {
+        let registry = TerminalRegistry::default();
+        let (control, receiver) = mpsc::channel();
+        lock(&registry.sessions).insert(
+            "s".into(),
+            Arc::new(Mutex::new(Session {
+                server_id: "server".into(),
+                control,
+                encoding: encoding_rs::UTF_8,
+                buffer: Vec::new(),
+                start: 0,
+                ready: true,
+                closed: None,
+                subscribers: vec![],
+            })),
+        );
+        assert_eq!(set_encoding(&registry, "s", "gb2312").unwrap(), "GBK");
+        assert!(set_encoding(&registry, "s", "utf-16").is_err());
+        assert!(set_encoding(&registry, "missing", "gbk").is_err());
+
+        terminal_type(&registry, "s", "echo 中").unwrap();
+        match receiver.try_recv() {
+            Ok(TerminalControl::Input(bytes)) => assert_eq!(bytes, b"echo \xd6\xd0"),
+            _ => panic!("no input"),
+        }
+        registry.output("s", b"\xc4\xe3\xba\xc3\r\n");
+        assert_eq!(registry.recent_text("s", 5).unwrap(), "你好");
     }
 
     #[test]

@@ -40,6 +40,23 @@ export class TerminalOutput {
     this.decoder = new TextDecoder(encoding, { fatal: false });
   }
 
+  /** The encoding output is decoded with, as `TextDecoder` names it. */
+  get encoding(): string {
+    return this.decoder.encoding;
+  }
+
+  /**
+   * Decode further output with another encoding. Returns what the old one
+   * still held (a character cut off mid-way), for showing before the rest.
+   */
+  setEncoding(encoding: string): string {
+    const next = new TextDecoder(encoding, { fatal: false });
+    if (next.encoding === this.decoder.encoding) return "";
+    const rest = this.decoder.decode();
+    this.decoder = next;
+    return rest;
+  }
+
   /** Bytes taken so far, as an offset into the session's output. */
   get offset(): number {
     return this.end;

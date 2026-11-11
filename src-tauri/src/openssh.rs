@@ -432,6 +432,7 @@ mod tests {
             color: String::new(),
             notes: String::new(),
             jump_server_id: None,
+            encoding: "UTF-8".into(),
             sort_order: 0,
             created_at: 0,
             updated_at: 0,

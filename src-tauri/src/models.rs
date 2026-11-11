@@ -17,6 +17,9 @@ pub struct ServerRecord {
     /// Another saved server to connect through (ProxyJump), if any.
     #[serde(default)]
     pub jump_server_id: Option<String>,
+    /// The terminal's character encoding, e.g. `UTF-8` or `GBK`.
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
     #[serde(default)]
     pub sort_order: u64,
     pub created_at: u64,
@@ -40,6 +43,8 @@ pub struct ServerInput {
     pub notes: String,
     #[serde(default)]
     pub jump_server_id: Option<String>,
+    #[serde(default)]
+    pub encoding: Option<String>,
     #[serde(default)]
     pub sort_order: Option<u64>,
 }
@@ -290,4 +295,8 @@ pub struct TailStatusPayload {
     pub viewer_id: String,
     pub state: String,
     pub message: Option<String>,
+}
+
+fn default_encoding() -> String {
+    crate::encoding::DEFAULT.into()
 }

@@ -89,6 +89,7 @@ import type {
   Snippet,
   TailViewerConfig,
 } from "./types";
+import { encodingLabel } from "./features/shell/encodings";
 import { startPointerDrag } from "./utils/pointerDrag";
 import { waitAtLeast, waitForNextPaint } from "./utils/timing";
 
@@ -639,6 +640,7 @@ export default function App() {
       host: server.host,
       color: server.color,
       sessionId: null,
+      encoding: server.encoding ?? "UTF-8",
       state: "connecting",
       status: isTauri ? null : demoStatus,
       networkSample: null,
@@ -768,7 +770,9 @@ export default function App() {
     if (!tab) return;
 
     terminalReadyTabs.current.delete(tabId);
-    patchTab(tabId, { sessionId: null, state: "connecting" });
+    // A new session starts with the server's encoding again.
+    const server = serversRef.current.find((item) => item.id === tab.serverId);
+    patchTab(tabId, { sessionId: null, state: "connecting", encoding: server?.encoding ?? tab.encoding });
     showNotice(`正在重新连接 ${tab.title}…`);
 
     try {
@@ -790,6 +794,25 @@ export default function App() {
       patchTab(tabId, { state: "closed" });
       showNotice(String(error));
     }
+  }
+
+  /** Switch the encoding of every pane's session in a tab. */
+  async function setTabEncoding(groupId: string, encoding: string) {
+    for (const paneId of paneIdsOf(paneLayoutsRef.current, groupId)) {
+      const tab = tabsRef.current.find((item) => item.id === paneId);
+      if (!tab) continue;
+      try {
+        const name =
+          isTauri && tab.sessionId
+            ? await command("terminal_set_encoding", { sessionId: tab.sessionId, encoding })
+            : encoding;
+        patchTab(paneId, { encoding: name });
+      } catch (error) {
+        showNotice(String(error));
+        return;
+      }
+    }
+    showNotice(`终端编码已切换为 ${encodingLabel(encoding)}`);
   }
 
   function cloneShell(tabId: string) {
@@ -1677,6 +1700,7 @@ export default function App() {
           onActivate={activateGroup}
           onClone={(groupId) => cloneShell(focusedPaneOf(groupId))}
           onReconnect={(groupId) => paneIdsOf(paneLayoutsRef.current, groupId).forEach((id) => void reconnectShell(id))}
+          onSetEncoding={(groupId, encoding) => void setTabEncoding(groupId, encoding)}
           onDetach={detachShell}
           onSplit={(groupId, direction) => splitShell(focusedPaneOf(groupId), direction)}
           paneCounts={paneCounts}

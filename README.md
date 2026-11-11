@@ -96,6 +96,9 @@ Each profile includes:
 - Optional private key path
 - Optional jump host: another saved server to connect through first; a jump
   host can have its own jump host (up to three hops)
+- Terminal encoding: UTF-8 by default, or GBK, GB18030, Big5, Shift_JIS,
+  EUC-KR and others for older systems and network devices; output is shown
+  and typed text sent in that encoding
 - A built-in connection test before saving
 - Password visibility toggle while editing
 
@@ -110,6 +113,9 @@ connections, secret export is optional and can be passphrase-protected.
 - Closing the native window closes active terminal tabs and hides the app
   instead of leaving background sessions behind.
 - Right-click a tab for tab-level actions.
+- If output looks garbled, switch the session's encoding from **Terminal
+  encoding** in the tab's menu. This leaves the server profile alone; a
+  reconnect goes back to the profile's encoding.
 - The top bar can stay visible or auto-hide until the pointer reaches the top
   edge.
 - The terminal font size is configurable in Settings.

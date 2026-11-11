@@ -168,10 +168,13 @@ export interface CommandMap {
 
   // Terminals
   open_terminal: { args: { id: string }; result: string };
-  attach_terminal: { args: { sessionId: string; onOutput: Channel<ArrayBuffer> }; result: void };
+  /** Returns the encoding to decode the session's output with. */
+  attach_terminal: { args: { sessionId: string; onOutput: Channel<ArrayBuffer> }; result: string };
   detach_terminal: { args: { sessionId: string; channelId: number }; result: void };
   terminal_input: { args: { sessionId: string; data: string }; result: void };
   terminal_resize: { args: { sessionId: string; cols: number; rows: number }; result: void };
+  /** Returns the encoding's canonical name. */
+  terminal_set_encoding: { args: { sessionId: string; encoding: string }; result: string };
   close_terminal: { args: { sessionId: string }; result: void };
 }
 
