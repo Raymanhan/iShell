@@ -21,7 +21,7 @@ const weightLabels: Record<TerminalFontWeight, string> = {
 };
 
 const renderingLabels: Record<TerminalTextRendering, string> = {
-  auto: msg("自动：Windows 浅色主题使用清晰模式"),
+  auto: msg("自动：Windows 和 macOS 使用清晰模式"),
   sharp: msg("清晰优先：不透明背景，启用 ClearType"),
   transparent: msg("透明优先：保留玻璃效果"),
 };
@@ -150,7 +150,7 @@ export function TerminalFontSettings({
         </select>
       </label>
       <p className="settings-hint">
-        {t("透明背景上的文字只能用灰度抗锯齿，浅色主题下会发虚；清晰模式让终端区域使用主题的实底颜色。")}
+        {t("透明背景上的文字只能用灰度抗锯齿，容易发虚，浅色主题下尤其明显；清晰模式让终端区域使用主题的实底颜色。")}
       </p>
 
       <div

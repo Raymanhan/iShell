@@ -462,11 +462,6 @@ export function applyWindowUnderlay(theme: AppTheme, transparency: number) {
   document.documentElement.style.setProperty("--window-underlay", getWindowUnderlay(theme, transparency));
 }
 
-/** Whether the theme's terminal surface is light (dark text on a light ground). */
-export function isLightTheme(theme: AppTheme) {
-  return isLightSurface(getThemeDefinition(theme).terminalSurface);
-}
-
 function isLightSurface(hex: string) {
   const value = Number.parseInt(hex.slice(1, 7), 16);
   const red = (value >> 16) & 0xff;

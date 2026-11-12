@@ -167,7 +167,7 @@ export default function App() {
     setGpuRendering,
   } = useAppSettings();
   const terminalFontStack = buildTerminalFontFamily(terminalFontFamily, currentFontPlatform());
-  const opaqueTerminal = wantsOpaqueTerminal(terminalTextRendering, theme, currentFontPlatform());
+  const opaqueTerminal = wantsOpaqueTerminal(terminalTextRendering, currentFontPlatform());
   const updater = useUpdater(autoCheckUpdates);
   const [tabs, setTabs] = useState<ShellTab[]>(() => handedOffInitialTab ? [handedOffInitialTab] : []);
   const ai = useAi(tabs);

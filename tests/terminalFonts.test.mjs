@@ -40,13 +40,12 @@ test('unknown saved values fall back to the defaults', () => {
   assert.equal(boldWeightFor('normal'), 'bold');
 });
 
-test('auto rendering goes opaque only for light themes on Windows', () => {
-  assert.equal(wantsOpaqueTerminal('auto', 'liquid-glass-pearl', 'windows'), true);
-  assert.equal(wantsOpaqueTerminal('auto', 'liquid-glass-clay-light', 'windows'), true);
-  assert.equal(wantsOpaqueTerminal('auto', 'liquid-glass-onyx', 'windows'), false);
-  assert.equal(wantsOpaqueTerminal('auto', 'liquid-glass-pearl', 'macos'), false);
-  assert.equal(wantsOpaqueTerminal('sharp', 'liquid-glass-onyx', 'macos'), true);
-  assert.equal(wantsOpaqueTerminal('transparent', 'liquid-glass-pearl', 'windows'), false);
+test('auto rendering goes opaque on Windows and macOS for every theme', () => {
+  assert.equal(wantsOpaqueTerminal('auto', 'windows'), true);
+  assert.equal(wantsOpaqueTerminal('auto', 'macos'), true);
+  assert.equal(wantsOpaqueTerminal('auto', 'linux'), false);
+  assert.equal(wantsOpaqueTerminal('sharp', 'linux'), true);
+  assert.equal(wantsOpaqueTerminal('transparent', 'windows'), false);
 });
 
 test('an opaque terminal theme uses the solid surface color', () => {

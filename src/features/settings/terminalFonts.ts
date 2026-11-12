@@ -1,5 +1,4 @@
 import { msg } from "../../i18n";
-import { isLightTheme, type AppTheme } from "../../constants/theme";
 
 export type FontPlatform = "windows" | "macos" | "linux" | "other";
 
@@ -120,8 +119,8 @@ export function boldWeightFor(weight: TerminalFontWeight) {
 
 /**
  * How terminal text is drawn. Glyphs on a transparent background only get
- * grayscale antialiasing, which looks thin and soft for dark text on light
- * themes on Windows; an opaque background enables ClearType.
+ * grayscale antialiasing, which looks thin and soft (worst on light themes);
+ * an opaque background enables subpixel antialiasing (ClearType).
  */
 export type TerminalTextRendering = "auto" | "sharp" | "transparent";
 export const terminalTextRenderings: readonly TerminalTextRendering[] = ["auto", "sharp", "transparent"];
@@ -132,11 +131,14 @@ export function readTerminalTextRendering(value: string | null): TerminalTextRen
     : "auto";
 }
 
-/** Whether the terminal draws on an opaque background for sharper text. */
-export function wantsOpaqueTerminal(mode: TerminalTextRendering, theme: AppTheme, platform: FontPlatform) {
+/**
+ * Whether the terminal draws on an opaque background for sharper text.
+ * "auto" does so on Windows and macOS, whatever the theme.
+ */
+export function wantsOpaqueTerminal(mode: TerminalTextRendering, platform: FontPlatform) {
   if (mode === "sharp") return true;
   if (mode === "transparent") return false;
-  return platform === "windows" && isLightTheme(theme);
+  return platform === "windows" || platform === "macos";
 }
 
 /**
