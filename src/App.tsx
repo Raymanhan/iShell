@@ -79,6 +79,11 @@ import { usePortForwards } from "./features/forwards/usePortForwards";
 import { snippetInput, useSnippets } from "./features/snippets/useSnippets";
 import { useUpdater } from "./features/updater/useUpdater";
 import { useAppSettings } from "./features/settings/useAppSettings";
+import {
+  buildTerminalFontFamily,
+  currentFontPlatform,
+  wantsOpaqueTerminal,
+} from "./features/settings/terminalFonts";
 import { demoStatus } from "./mocks/demoData";
 import { loadDemoFiles } from "./mocks/demoSftp";
 import type {
@@ -146,6 +151,12 @@ export default function App() {
     setWindowTransparency,
     terminalFontSize,
     setTerminalFontSize,
+    terminalFontFamily,
+    setTerminalFontFamily,
+    terminalFontWeight,
+    setTerminalFontWeight,
+    terminalTextRendering,
+    setTerminalTextRendering,
     tailViewerDefaultLines,
     setTailViewerDefaultLines,
     autoCheckUpdates,
@@ -155,6 +166,8 @@ export default function App() {
     gpuRendering,
     setGpuRendering,
   } = useAppSettings();
+  const terminalFontStack = buildTerminalFontFamily(terminalFontFamily, currentFontPlatform());
+  const opaqueTerminal = wantsOpaqueTerminal(terminalTextRendering, currentFontPlatform());
   const updater = useUpdater(autoCheckUpdates);
   const [tabs, setTabs] = useState<ShellTab[]>(() => handedOffInitialTab ? [handedOffInitialTab] : []);
   const ai = useAi(tabs);
@@ -1812,6 +1825,9 @@ export default function App() {
                             inputRegistry={paneInputsRef.current}
                             theme={theme}
                             fontSize={terminalFontSize}
+                            fontFamily={terminalFontStack}
+                            fontWeight={terminalFontWeight}
+                            opaqueBackground={opaqueTerminal}
                             gpuRendering={gpuRendering}
                             layoutSignal={`${filesOpen}:${filesRatio}:${filesDragging}:${connectionsOpen}:${sidePanel}:${statusPanelWidth}:${tabs.length}`}
                             setNotice={showNotice}
@@ -2046,6 +2062,9 @@ export default function App() {
           theme={theme}
           windowTransparency={windowTransparency}
           terminalFontSize={terminalFontSize}
+          terminalFontFamily={terminalFontFamily}
+          terminalFontWeight={terminalFontWeight}
+          terminalTextRendering={terminalTextRendering}
           tailViewerDefaultLines={tailViewerDefaultLines}
           autoHideTopBar={autoHideTopBar}
           gpuRendering={gpuRendering}
@@ -2054,6 +2073,9 @@ export default function App() {
           onThemeChange={setTheme}
           onWindowTransparencyChange={setWindowTransparency}
           onTerminalFontSizeChange={setTerminalFontSize}
+          onTerminalFontFamilyChange={setTerminalFontFamily}
+          onTerminalFontWeightChange={setTerminalFontWeight}
+          onTerminalTextRenderingChange={setTerminalTextRendering}
           onTailViewerDefaultLinesChange={setTailViewerDefaultLines}
           onAutoHideTopBarChange={setAutoHideTopBar}
           onGpuRenderingChange={setGpuRendering}

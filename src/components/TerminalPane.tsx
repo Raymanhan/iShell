@@ -6,7 +6,8 @@ import { Terminal } from "@xterm/xterm";
 import { RefreshCw, X } from "lucide-react";
 import { command, isTauri, saveReceivedFile, writeTerminalBytes as sendRawBytes } from "../api/tauri";
 import { ZmodemController, type LocalFile } from "../features/shell/zmodem";
-import { getTerminalSurfaceReport, getTerminalTheme, type AppTheme } from "../constants/theme";
+import { getTerminalSurfaceReport, getTerminalTheme, getThemeDefinition, type AppTheme } from "../constants/theme";
+import { boldWeightFor, type TerminalFontWeight } from "../features/settings/terminalFonts";
 import { splitShortcutDirection, type PaneRect, type SplitDirection } from "../features/shell/panes";
 import { directoryLinkProvider } from "../features/shell/directoryLinks";
 import {
@@ -33,9 +34,6 @@ const passwordPromptPattern = /(?:password|passphrase|密码|口令)[^:\n\r]*[:�
 const platformSource = `${navigator.userAgent} ${navigator.platform}`.toLowerCase();
 const isWindowsPlatform = platformSource.includes("win");
 const isMacPlatform = platformSource.includes("mac");
-const terminalFontFamily = platformSource.includes("win")
-  ? '"Cascadia Mono", "Cascadia Code", Consolas, "Microsoft YaHei Mono", "Microsoft YaHei", monospace'
-  : '"SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace';
 const HISTORY_SUGGESTION_LIMIT = 8;
 
 interface HistorySuggestState {
@@ -67,6 +65,9 @@ function TerminalPaneBase({
   visible,
   theme,
   fontSize,
+  fontFamily,
+  fontWeight,
+  opaqueBackground,
   gpuRendering = true,
   layoutSignal,
   setNotice,
@@ -92,6 +93,14 @@ function TerminalPaneBase({
   visible: boolean;
   theme: AppTheme;
   fontSize: number;
+  /** CSS font-family, with fallbacks. */
+  fontFamily: string;
+  fontWeight: TerminalFontWeight;
+  /**
+   * Draw on the theme's solid surface instead of a transparent background,
+   * which lets glyphs use subpixel (ClearType) antialiasing.
+   */
+  opaqueBackground: boolean;
   /** Draw with WebGL; read when the terminal is created. */
   gpuRendering?: boolean;
   layoutSignal: string;
@@ -541,17 +550,20 @@ function TerminalPaneBase({
     const fit = new FitAddon();
     const terminal = new Terminal({
       cursorBlink: true,
-      fontFamily: terminalFontFamily,
+      fontFamily,
       fontSize,
+      fontWeight,
+      fontWeightBold: boldWeightFor(fontWeight),
       lineHeight: 1.35,
       scrollback: 8000,
       // Required for the glass theme: without this xterm paints an opaque
       // background (ignoring the #00000000 theme color) and covers the macOS
       // vibrancy across the whole terminal region.
-      allowTransparency: true,
+      // An opaque background (opaqueBackground) turns this off for ClearType.
+      allowTransparency: !opaqueBackground,
       // Search highlights use the decorations API.
       allowProposedApi: true,
-      theme: getTerminalTheme(theme),
+      theme: getTerminalTheme(theme, opaqueBackground),
     });
 
     const search = new SearchAddon();
@@ -789,15 +801,20 @@ function TerminalPaneBase({
   useEffect(() => {
     themeRef.current = theme;
     if (!terminalRef.current) return;
-    terminalRef.current.options.theme = getTerminalTheme(theme);
+    terminalRef.current.options.allowTransparency = !opaqueBackground;
+    terminalRef.current.options.theme = getTerminalTheme(theme, opaqueBackground);
     requestFitRef.current?.();
-  }, [theme]);
+  }, [theme, opaqueBackground]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
-    terminalRef.current.options.fontSize = fontSize;
+    const options = terminalRef.current.options;
+    options.fontSize = fontSize;
+    options.fontFamily = fontFamily;
+    options.fontWeight = fontWeight;
+    options.fontWeightBold = boldWeightFor(fontWeight);
     requestFitRef.current?.();
-  }, [fontSize]);
+  }, [fontSize, fontFamily, fontWeight]);
 
   // Each pane subscribes to its session with a channel of its own. Attaching
   // replays the session's buffered output and subscribes in one step, so
@@ -883,7 +900,10 @@ function TerminalPaneBase({
       onPointerDownCapture={pane && !pane.focused ? onFocusPane : undefined}
       onFocusCapture={pane && !pane.focused ? onFocusPane : undefined}
     >
-      <div className="terminal-frame">
+      <div
+        className="terminal-frame"
+        style={opaqueBackground ? { background: getThemeDefinition(theme).terminalSurface } : undefined}
+      >
         <div className="terminal-host" ref={containerRef} />
         {searchSignal > 0 && searchAddon && (
           <TerminalSearchBar
@@ -970,6 +990,9 @@ export const TerminalPane = memo(TerminalPaneBase, (previous, next) => {
     previous.visible === next.visible &&
     previous.theme === next.theme &&
     previous.fontSize === next.fontSize &&
+    previous.fontFamily === next.fontFamily &&
+    previous.fontWeight === next.fontWeight &&
+    previous.opaqueBackground === next.opaqueBackground &&
     previous.layoutSignal === next.layoutSignal &&
     previous.pasteRequest?.id === next.pasteRequest?.id &&
     previous.commandRequest?.id === next.commandRequest?.id &&

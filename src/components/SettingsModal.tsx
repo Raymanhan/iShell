@@ -3,6 +3,8 @@ import { Download, Droplets, Info, Languages, Layers, Palette, RefreshCw, Sparkl
 import { command, isTauri } from "../api/tauri";
 import { AiSettings } from "./AiSettings";
 import { ReleaseHistory } from "./ReleaseHistory";
+import { TerminalFontSettings } from "./TerminalFontSettings";
+import type { TerminalFontWeight, TerminalTextRendering } from "../features/settings/terminalFonts";
 import type { AiConfig } from "../features/ai/types";
 import {
   clampTailViewerLines,
@@ -40,6 +42,9 @@ export function SettingsModal({
   theme,
   windowTransparency,
   terminalFontSize,
+  terminalFontFamily,
+  terminalFontWeight,
+  terminalTextRendering,
   tailViewerDefaultLines,
   autoHideTopBar,
   gpuRendering,
@@ -48,6 +53,9 @@ export function SettingsModal({
   onThemeChange,
   onWindowTransparencyChange,
   onTerminalFontSizeChange,
+  onTerminalFontFamilyChange,
+  onTerminalFontWeightChange,
+  onTerminalTextRenderingChange,
   onTailViewerDefaultLinesChange,
   onAutoHideTopBarChange,
   onGpuRenderingChange,
@@ -62,6 +70,9 @@ export function SettingsModal({
   theme: AppTheme;
   windowTransparency: number;
   terminalFontSize: number;
+  terminalFontFamily: string;
+  terminalFontWeight: TerminalFontWeight;
+  terminalTextRendering: TerminalTextRendering;
   tailViewerDefaultLines: number;
   autoHideTopBar: boolean;
   gpuRendering: boolean;
@@ -70,6 +81,9 @@ export function SettingsModal({
   onThemeChange: (theme: AppTheme) => void;
   onWindowTransparencyChange: (transparency: number) => void;
   onTerminalFontSizeChange: (size: number) => void;
+  onTerminalFontFamilyChange: (family: string) => void;
+  onTerminalFontWeightChange: (weight: TerminalFontWeight) => void;
+  onTerminalTextRenderingChange: (mode: TerminalTextRendering) => void;
   onTailViewerDefaultLinesChange: (lines: number) => void;
   onAutoHideTopBarChange: (autoHide: boolean) => void;
   onGpuRenderingChange: (enabled: boolean) => void;
@@ -276,7 +290,7 @@ export function SettingsModal({
                 <div className="settings-section">
                   <div className="settings-section-copy">
                     <h3>{t("终端文字")}</h3>
-                    <p>{t("调整 Shell 内容的字号，已打开的会话会立即生效。")}</p>
+                    <p>{t("调整 Shell 内容的字体、字号和渲染方式，已打开的会话会立即生效。")}</p>
                   </div>
 
                   <label className="settings-range">
@@ -291,6 +305,16 @@ export function SettingsModal({
                     />
                     <strong>{terminalFontSize}px</strong>
                   </label>
+
+                  <TerminalFontSettings
+                    fontFamily={terminalFontFamily}
+                    fontWeight={terminalFontWeight}
+                    fontSize={terminalFontSize}
+                    textRendering={terminalTextRendering}
+                    onFontFamilyChange={onTerminalFontFamilyChange}
+                    onFontWeightChange={onTerminalFontWeightChange}
+                    onTextRenderingChange={onTerminalTextRenderingChange}
+                  />
 
                   <label className="settings-toggle">
                     <span>
