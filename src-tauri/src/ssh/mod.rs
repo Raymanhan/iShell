@@ -74,13 +74,13 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 /// Whether the file panel reaches this server over SFTP.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn sftp_available_for_tests(app: &AppHandle, id: &str) -> bool {
     sftp_client::with_sftp(app, id, async |_| Ok(())).is_ok()
 }
 
 /// Whether transfers for this server go over SFTP, optionally forcing them to.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn sftp_transfers_for_tests(app: &AppHandle, id: &str, force: Option<bool>) -> bool {
     if let Some(over_sftp) = force {
         sftp_client::remember_exec_transfers(id, !over_sftp);

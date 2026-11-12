@@ -162,7 +162,7 @@ impl TerminalRegistry {
     }
 
     /// Whether the session exists and has not ended.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn is_open(&self, session_id: &str) -> bool {
         self.with_session(session_id, |session| session.closed.is_none())
             .unwrap_or(false)
