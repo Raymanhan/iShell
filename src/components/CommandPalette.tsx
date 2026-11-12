@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Search } from "lucide-react";
 import { rankEntries, type PaletteEntry } from "../features/palette/match";
+import { t } from "../i18n";
 
 export interface PaletteItem extends PaletteEntry {
   /** Shown on the right: what kind of item this is. */
@@ -59,13 +60,13 @@ export function CommandPalette({ items, onClose }: { items: PaletteItem[]; onClo
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="command-palette" role="dialog" aria-modal="true" aria-label="命令面板">
+      <div className="command-palette" role="dialog" aria-modal="true" aria-label={t("命令面板")}>
         <label className="palette-search">
           <Search size={15} aria-hidden />
           <input
             autoFocus
             value={query}
-            placeholder="搜索服务器、标签、片段或操作…"
+            placeholder={t("搜索服务器、标签、片段或操作…")}
             role="combobox"
             aria-expanded
             aria-controls="palette-results"
@@ -75,7 +76,7 @@ export function CommandPalette({ items, onClose }: { items: PaletteItem[]; onClo
           />
         </label>
         <div className="palette-results" id="palette-results" role="listbox" ref={listRef}>
-          {results.length === 0 && <div className="palette-empty">没有匹配的项目</div>}
+          {results.length === 0 && <div className="palette-empty">{t("没有匹配的项目")}</div>}
           {results.map((item, index) => (
             <div
               key={item.id}

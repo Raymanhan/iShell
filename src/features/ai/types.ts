@@ -4,6 +4,8 @@ export const AI_PROVIDER_DEFAULT_URLS: Record<AiProvider, string> = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com",
 };
+import { msg, t } from "../../i18n";
+
 export interface AiConfig {
   provider: AiProvider;
   baseUrl: string;
@@ -30,7 +32,20 @@ export interface AiModel {
   name: string;
   reasoningEfforts: { value: string; label: string; description: string }[];
   defaultReasoningEffort: string | null;
+  /** Declared context window in tokens, when the service reports one. */
+  contextWindow?: number | null;
   manual?: boolean;
+}
+/** Used when the model metadata declares no context window. */
+export const DEFAULT_COMPACTION_THRESHOLD = 200_000;
+/** Mirrors `context::Budget::for_window` in the desktop backend. */
+export function compactionThreshold(contextWindow?: number | null): number {
+  if (!contextWindow || contextWindow <= 0) return DEFAULT_COMPACTION_THRESHOLD;
+  return Math.max(8_000, Math.floor((contextWindow * 3) / 4));
+}
+/** Saving re-encrypts the whole conversation; batch more while a task streams. */
+export function historyWriteDelay(running: boolean): number {
+  return running ? 2000 : 500;
 }
 export function mergeModelSources(
   models: AiModel[],
@@ -43,7 +58,7 @@ export function mergeModelSources(
     if (id && !merged.some((model) => model.id === id))
       merged.push({
         id,
-        name: `${id}（手动）`,
+        name: t("{0}（手动）", id),
         reasoningEfforts: [],
         defaultReasoningEffort: null,
         manual: true,
@@ -55,24 +70,27 @@ export const permissionOptions: {
   value: AiPermission;
   label: string;
   description: string;
-}[] = [
-  {
-    value: "suggest",
-    label: "仅建议",
-    description: "只生成操作建议，不执行服务器工具",
+}[] = (
+  [
+    ["suggest", msg("仅建议"), msg("只生成操作建议，不执行服务器工具")],
+    ["ask", msg("执行前确认"), msg("每次工具调用都需要确认")],
+    [
+      "auto",
+      msg("自动 · 低风险"),
+      msg("只读操作自动执行；写入文件、修改服务器、运行代码或读取凭证前需确认"),
+    ],
+    ["full", msg("完全访问"), msg("自动执行任务中的所有工具操作，不再逐项确认")],
+  ] as const
+).map(([value, label, description]) => ({
+  value,
+  // Getters translate on every read, so the list follows language changes.
+  get label() {
+    return t(label);
   },
-  { value: "ask", label: "执行前确认", description: "每次工具调用都需要确认" },
-  {
-    value: "auto",
-    label: "自动 · 低风险",
-    description: "低风险查询自动执行；修改文件、代码与未知命令需确认",
+  get description() {
+    return t(description);
   },
-  {
-    value: "full",
-    label: "完全访问",
-    description: "自动执行任务中的所有工具操作，不再逐项确认",
-  },
-];
+}));
 export interface AiRisk {
   level: "low" | "medium" | "high";
   label: string;
@@ -99,14 +117,14 @@ export function modelSelection(
       ? effort
       : model?.defaultReasoningEffort || "default";
   const efforts = [
-    { value: "default", label: "默认", description: "使用服务默认的思考程度" },
+    { value: "default", label: t("默认"), description: t("使用服务默认的思考程度") },
     ...supported,
   ];
   if (manualEffort && effort && !efforts.some((item) => item.value === effort))
     efforts.push({
       value: effort,
-      label: `${effort}（手动）`,
-      description: "手动指定的 API 参数",
+      label: t("{0}（手动）", effort),
+      description: t("手动指定的 API 参数"),
     });
   return {
     model: model?.id || "",
@@ -284,6 +302,47 @@ export function applyAiEvent(
   return entries;
 }
 
+/** Streamed text waits this long so a burst of tokens updates the panel once. */
+export const TEXT_BATCH_MS = 32;
+
+/** A text or thinking delta waiting to be applied to its reply. */
+export interface QueuedText {
+  event: AiEvent;
+  assistantId: string;
+}
+
+/**
+ * Adds a streamed delta to the queue, joining it to the previous one when it
+ * continues the same field of the same reply, so order is kept exactly.
+ */
+export function queueText(
+  queue: QueuedText[],
+  event: AiEvent,
+  assistantId: string,
+): QueuedText[] {
+  const last = queue[queue.length - 1];
+  if (last && last.assistantId === assistantId && last.event.type === event.type)
+    return [
+      ...queue.slice(0, -1),
+      {
+        assistantId,
+        event: { ...last.event, text: (last.event.text || "") + (event.text || "") },
+      },
+    ];
+  return [...queue, { event, assistantId }];
+}
+
+/** Applies queued deltas in order, as if each had arrived on its own. */
+export function applyQueuedText(
+  entries: AiEntry[],
+  queue: QueuedText[],
+): AiEntry[] {
+  return queue.reduce(
+    (current, item) => applyAiEvent(current, item.event, item.assistantId),
+    entries,
+  );
+}
+
 export function createConversation(
   config: AiConfig,
   serverId: string,
@@ -304,7 +363,7 @@ export function conversationTitle(conversation: AiConversation): string {
       .find((entry) => entry.kind === "user")
       ?.text?.trim()
       .replace(/\s+/g, " ")
-      .slice(0, 80) || "新对话"
+      .slice(0, 80) || t("新对话")
   );
 }
 
@@ -388,7 +447,7 @@ export function restoreConversation(saved: AiConversation): AiConversation {
             {
               id: crypto.randomUUID(),
               kind: "notice" as const,
-              text: "上次任务在应用关闭前未结束。请先检查服务器现状；继续对话不会自动重放此前操作。",
+              text: t("上次任务在应用关闭前未结束。请先检查服务器现状；继续对话不会自动重放此前操作。"),
             },
           ]
         : []),
@@ -417,4 +476,80 @@ export function resolveTargets(
     else missing.push(serverId);
   }
   return { sessions, missing };
+}
+
+/**
+ * `/compact [what to keep]` compacts the conversation instead of sending a
+ * message. Returns the focus text ("" when none), or null for other input.
+ */
+export function parseCompactCommand(text: string): string | null {
+  const match = /^\/compact(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  return match ? (match[1] || "").trim() : null;
+}
+
+/** Start of the message that replaces compacted history (`context::compact`). */
+const COMPACTED_HISTORY_PREFIX = "[已压缩的历史上下文";
+
+/** A user bubble that was sent to the model (a `/compact` command is not). */
+function sentToModel(entry: AiEntry): boolean {
+  return (
+    entry.kind === "user" &&
+    Boolean(entry.text) &&
+    parseCompactCommand(entry.text || "") === null
+  );
+}
+
+/**
+ * The conversation as it was just before the user message `entryId` was sent,
+ * for editing that message and running the task again from there. The model
+ * context keeps each request verbatim as `{role: "user", content}`, so the
+ * message is found by counting the user requests sent after it from the end,
+ * and checked by its text. Null when it cannot be rewound exactly: it was
+ * folded into a compaction summary, or it is not a sent message.
+ */
+export function rewindTo(
+  conversation: Pick<AiConversation, "entries" | "messages">,
+  entryId: string,
+): { entries: AiEntry[]; messages: Record<string, unknown>[] } | null {
+  const { entries, messages } = conversation;
+  const index = entries.findIndex((entry) => entry.id === entryId);
+  const entry = entries[index];
+  if (!entry || !sentToModel(entry)) return null;
+  const later = entries.slice(index + 1).filter(sentToModel).length;
+  let seen = 0;
+  for (let at = messages.length - 1; at >= 0; at--) {
+    const message = messages[at];
+    if (message.role !== "user" || typeof message.content !== "string")
+      continue;
+    if (message.content.startsWith(COMPACTED_HISTORY_PREFIX)) return null;
+    if (seen++ < later) continue;
+    return message.content === entry.text
+      ? { entries: entries.slice(0, index), messages: messages.slice(0, at) }
+      : null;
+  }
+  return null;
+}
+
+/** The user messages `rewindTo` can rewind to, found in one pass. */
+export function editableUserEntries(
+  conversation: Pick<AiConversation, "entries" | "messages">,
+): Set<string> {
+  const { entries, messages } = conversation;
+  const ids = new Set<string>();
+  let at = messages.length - 1;
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (!sentToModel(entry)) continue;
+    while (
+      at >= 0 &&
+      (messages[at].role !== "user" || typeof messages[at].content !== "string")
+    )
+      at--;
+    const content = at >= 0 ? (messages[at].content as string) : null;
+    if (content === null || content.startsWith(COMPACTED_HISTORY_PREFIX))
+      break;
+    if (content === entry.text) ids.add(entry.id);
+    at--;
+  }
+  return ids;
 }

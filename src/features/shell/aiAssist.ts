@@ -1,4 +1,5 @@
-/** The terminal's AI shortcuts. Pure helpers, free of imports for the tests. */
+/** The terminal's AI shortcuts. Pure helpers; they import only i18n, so the tests can load them. */
+import { t } from "../../i18n";
 
 interface KeyLike {
   type: string;
@@ -72,5 +73,5 @@ export function cleanSuggestedCommand(answer: string): string {
 export function selectionPrompt(selection: string): string {
   const text = selection.replace(/\s+$/, "").slice(-12_000);
   const fence = text.includes("```") ? "~~~" : "```";
-  return `解释下面这段终端输出，指出问题原因并给出下一步建议：\n${fence}\n${text}\n${fence}`;
+  return t("解释下面这段终端输出，指出问题原因并给出下一步建议：\n{0}\n{1}\n{0}", fence, text);
 }

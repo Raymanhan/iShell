@@ -12,6 +12,12 @@ import { manageNativeDragGhost } from "../features/shell/nativeDragGhost";
 import { MAX_PANES, splitShortcutLabel, type SplitDirection } from "../features/shell/panes";
 import type { ShellTab, SidePanel } from "../features/shell/types";
 
+import { t } from "../i18n";
+/** Space between the tab strip and the controls beside it. */
+const TOPBAR_GAP = 10;
+/** Width of the drag area kept after the last tab. */
+const TAB_SPACER = 18;
+
 interface TabDropPoint {
   screenX: number;
   screenY: number;
@@ -88,6 +94,10 @@ export function TabBar({
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef(new Map<string, HTMLDivElement>());
+  const barRef = useRef<HTMLElement>(null);
+  const leftRef = useRef<HTMLDivElement>(null);
+  const rightRef = useRef<HTMLDivElement>(null);
+  const stripRef = useRef<HTMLDivElement>(null);
   const tabRectsBeforeReorder = useRef(new Map<string, DOMRect>());
   const tabDragRef = useRef<{
     tabId: string;
@@ -147,6 +157,61 @@ export function TabBar({
 
     previousRects.clear();
   }, [tabs, draggingTabId]);
+
+  // Keep the tab strip clear of the controls on both sides: their width
+  // changes with the platform, the connection drawer and the active tab.
+  useLayoutEffect(() => {
+    const bar = barRef.current;
+    const left = leftRef.current;
+    const right = rightRef.current;
+    if (!bar || !left || !right) return;
+    const measure = () => {
+      const barRect = bar.getBoundingClientRect();
+      const leftEdge = Math.ceil(left.getBoundingClientRect().right - barRect.left + TOPBAR_GAP);
+      const rightEdge = Math.ceil(barRect.right - right.getBoundingClientRect().left + TOPBAR_GAP);
+      bar.style.setProperty("--topbar-left-reserve", `${leftEdge}px`);
+      bar.style.setProperty("--topbar-right-reserve", `${rightEdge}px`);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(bar);
+    observer.observe(left);
+    observer.observe(right);
+    return () => observer.disconnect();
+  }, []);
+
+  // Too many tabs to fit: the strip scrolls sideways, fades at the clipped
+  // edge, and keeps the active tab in view.
+  useLayoutEffect(() => {
+    const strip = stripRef.current;
+    if (!strip) return;
+    const update = () => {
+      const max = strip.scrollWidth - strip.clientWidth;
+      strip.classList.toggle("fade-left", strip.scrollLeft > 1);
+      strip.classList.toggle("fade-right", strip.scrollLeft < max - 1);
+    };
+    update();
+    strip.addEventListener("scroll", update, { passive: true });
+    const observer = new ResizeObserver(update);
+    observer.observe(strip);
+    return () => {
+      strip.removeEventListener("scroll", update);
+      observer.disconnect();
+    };
+  }, [tabs.length > 0]);
+
+  useLayoutEffect(() => {
+    const strip = stripRef.current;
+    const node = activeTabId ? tabRefs.current.get(activeTabId) : undefined;
+    if (!strip || !node) return;
+    const stripRect = strip.getBoundingClientRect();
+    const rect = node.getBoundingClientRect();
+    if (rect.left < stripRect.left) {
+      strip.scrollLeft -= stripRect.left - rect.left + TOPBAR_GAP;
+    } else if (rect.right > stripRect.right - TAB_SPACER) {
+      strip.scrollLeft += rect.right - (stripRect.right - TAB_SPACER) + TOPBAR_GAP;
+    }
+  }, [activeTabId, tabs.length]);
 
   useEffect(() => {
     if (!menu) return;
@@ -435,19 +500,20 @@ export function TabBar({
 
   return (
     <header
+      ref={barRef}
       className={`workbench-bar ${autoHide ? "auto-hide" : ""} ${connectionsOpen ? "connections-open" : ""} ${tabs.length > 0 ? "has-tabs" : ""} ${
         draggingTabId ? "tab-dragging" : ""
       }`}
     >
       <div className="topbar-drag-strip" data-tauri-drag-region aria-hidden />
 
-      <div className="topbar-left">
+      <div className="topbar-left" ref={leftRef}>
         <button
           type="button"
           className={`connection-trigger ${connectionsOpen ? "on" : ""}`}
           onClick={onOpenConnections}
-          title="连接管理"
-          aria-label={`连接管理，${serverCount} 台主机`}
+          title={t("连接管理")}
+          aria-label={t("连接管理，{0} 台主机", serverCount)}
           aria-pressed={connectionsOpen}
         >
           <PanelLeft size={15} />
@@ -458,8 +524,8 @@ export function TabBar({
             type="button"
             className="icon-button topbar-new"
             onClick={onNewServer}
-            title="新建"
-            aria-label="新建"
+            title={t("新建")}
+            aria-label={t("新建")}
           >
             <Plus size={16} />
           </button>
@@ -468,8 +534,8 @@ export function TabBar({
           type="button"
           className="icon-button topbar-new"
           onClick={onOpenLocal}
-          title="本地终端"
-          aria-label="打开本地终端"
+          title={t("本地终端")}
+          aria-label={t("打开本地终端")}
         >
           <SquareTerminal size={15} />
         </button>
@@ -480,7 +546,16 @@ export function TabBar({
         {...(tabs.length === 0 ? { "data-tauri-drag-region": true } : {})}
       >
         {tabs.length > 0 ? (
-          <div className={`terminal-tabs ${draggingTabId ? "is-sorting" : ""}`} role="tablist" aria-label="已连接服务器">
+          <div
+            ref={stripRef}
+            className={`terminal-tabs ${draggingTabId ? "is-sorting" : ""}`}
+            role="tablist"
+            aria-label={t("已连接服务器")}
+            onWheel={(event) => {
+              // A mouse wheel scrolls the strip sideways; trackpads already do.
+              if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) event.currentTarget.scrollLeft += event.deltaY;
+            }}
+          >
             {tabs.map((tab) => (
               <div
                 key={tab.id}
@@ -518,7 +593,7 @@ export function TabBar({
                   <span className={`tab-dot ${tab.state}`} style={{ color: tab.color }} />
                   <span className="terminal-tab-title">{tab.title}</span>
                   {paneCounts[tab.id] && (
-                    <span className="terminal-tab-panes" title={`${paneCounts[tab.id]} 个分屏窗格`}>
+                    <span className="terminal-tab-panes" title={t("{0} 个分屏窗格", paneCounts[tab.id])}>
                       {paneCounts[tab.id]}
                     </span>
                   )}
@@ -527,8 +602,8 @@ export function TabBar({
                   type="button"
                   className="terminal-tab-action"
                   onClick={() => onClose(tab.id)}
-                  title="关闭连接"
-                  aria-label={`关闭 ${tab.title}`}
+                  title={t("关闭连接")}
+                  aria-label={t("关闭 {0}", tab.title)}
                 >
                   <X size={13} />
                 </button>
@@ -543,16 +618,16 @@ export function TabBar({
         )}
       </div>
 
-      <div className="bar-right">
-        <div className="dock-switcher" role="group" aria-label="工具">
+      <div className="bar-right" ref={rightRef}>
+        <div className="dock-switcher" role="group" aria-label={t("工具")}>
           {activeTabId && (
             <>
               <button
                 type="button"
                 className={`dock-toggle ${filesOpen ? "on" : ""}`}
                 onClick={onToggleFiles}
-                title="文件面板"
-                aria-label="文件面板"
+                title={t("文件面板")}
+                aria-label={t("文件面板")}
                 aria-pressed={filesOpen}
               >
                 <span className="dock-toggle-icon">
@@ -563,8 +638,8 @@ export function TabBar({
                 type="button"
                 className={`dock-toggle ${sidePanel === "status" ? "on" : ""}`}
                 onClick={() => onToggleSidePanel("status")}
-                title="监控面板"
-                aria-label="监控面板"
+                title={t("监控面板")}
+                aria-label={t("监控面板")}
                 aria-pressed={sidePanel === "status"}
               >
                 <span className="dock-toggle-icon">
@@ -575,8 +650,8 @@ export function TabBar({
                 type="button"
                 className={`dock-toggle ${sidePanel === "history" ? "on" : ""}`}
                 onClick={() => onToggleSidePanel("history")}
-                title="历史命令"
-                aria-label="历史命令"
+                title={t("历史命令")}
+                aria-label={t("历史命令")}
                 aria-pressed={sidePanel === "history"}
               >
                 <span className="dock-toggle-icon">
@@ -587,8 +662,8 @@ export function TabBar({
                 type="button"
                 className={`dock-toggle ${sidePanel === "snippets" ? "on" : ""}`}
                 onClick={() => onToggleSidePanel("snippets")}
-                title="命令片段"
-                aria-label="命令片段"
+                title={t("命令片段")}
+                aria-label={t("命令片段")}
                 aria-pressed={sidePanel === "snippets"}
               >
                 <span className="dock-toggle-icon">
@@ -599,8 +674,8 @@ export function TabBar({
                 type="button"
                 className={`dock-toggle ${sidePanel === "forwards" ? "on" : ""}`}
                 onClick={() => onToggleSidePanel("forwards")}
-                title="端口转发"
-                aria-label="端口转发"
+                title={t("端口转发")}
+                aria-label={t("端口转发")}
                 aria-pressed={sidePanel === "forwards"}
               >
                 <span className="dock-toggle-icon">
@@ -611,8 +686,8 @@ export function TabBar({
                 type="button"
                 className={`dock-toggle ${broadcastActive ? "on broadcast-on" : ""}`}
                 onClick={onToggleBroadcast}
-                title="广播输入：同时向多个会话输入"
-                aria-label="广播输入"
+                title={t("广播输入：同时向多个会话输入")}
+                aria-label={t("广播输入")}
                 aria-pressed={broadcastActive}
               >
                 <span className="dock-toggle-icon">
@@ -625,8 +700,8 @@ export function TabBar({
             type="button"
             className={`dock-toggle ${sidePanel === "ai" ? "on" : ""}`}
             onClick={() => onToggleSidePanel("ai")}
-            title="AI 助手"
-            aria-label="AI 助手"
+            title={t("AI 助手")}
+            aria-label={t("AI 助手")}
             aria-pressed={sidePanel === "ai"}
             disabled={!activeTabId}
           >
@@ -636,8 +711,8 @@ export function TabBar({
             type="button"
             className="dock-toggle"
             onClick={onOpenSettings}
-            title="设置"
-            aria-label="设置"
+            title={t("设置")}
+            aria-label={t("设置")}
           >
             <span className="dock-toggle-icon">
               <Settings size={14} />
@@ -656,11 +731,10 @@ export function TabBar({
         >
           <button type="button" role="menuitem" onClick={() => runMenu(() => onClone(menu.tabId))}>
             <Copy size={14} />
-            克隆
-          </button>
+            {t("克隆")}</button>
           <button type="button" role="menuitem" onClick={() => runMenu(() => onReconnect(menu.tabId))}>
             <RefreshCw size={14} />
-            重连
+            {t("重连")}
           </button>
           <button
             type="button"
@@ -669,7 +743,7 @@ export function TabBar({
             onClick={() => setEncodingMenuOpen((open) => !open)}
           >
             <Languages size={14} />
-            终端编码
+            {t("终端编码")}
             <span className="ctx-value">{menuTab?.encoding ?? "UTF-8"}</span>
           </button>
           {encodingMenuOpen &&
@@ -683,7 +757,7 @@ export function TabBar({
                 onClick={() => runMenu(() => onSetEncoding(menu.tabId, item.value))}
               >
                 {(menuTab?.encoding ?? "UTF-8").toLowerCase() === item.value.toLowerCase() ? <Check size={13} /> : <span className="ctx-check-space" />}
-                {item.label}
+                {t(item.label)}
               </button>
             ))}
           <div className="ctx-sep" role="separator" />
@@ -694,8 +768,7 @@ export function TabBar({
             onClick={() => runMenu(() => onSplit(menu.tabId, "row"))}
           >
             <Columns2 size={14} />
-            向右分屏
-            <kbd>{splitShortcutLabel.row}</kbd>
+            {t("向右分屏")}<kbd>{splitShortcutLabel.row}</kbd>
           </button>
           <button
             type="button"
@@ -704,14 +777,12 @@ export function TabBar({
             onClick={() => runMenu(() => onSplit(menu.tabId, "column"))}
           >
             <Rows2 size={14} />
-            向下分屏
-            <kbd>{splitShortcutLabel.column}</kbd>
+            {t("向下分屏")}<kbd>{splitShortcutLabel.column}</kbd>
           </button>
           {tabs.length > 1 && !paneCounts[menu.tabId] && (
             <button type="button" role="menuitem" onClick={() => runMenu(() => onDetach(menu.tabId))}>
               <PanelsTopLeft size={14} />
-              移至新窗口
-            </button>
+              {t("移至新窗口")}</button>
           )}
           <div className="ctx-sep" role="separator" />
           <button
@@ -720,22 +791,18 @@ export function TabBar({
             disabled={leftTabIds.length === 0}
             onClick={() => runMenu(() => onCloseTabs(leftTabIds))}
           >
-            关闭左侧
-          </button>
+            {t("关闭左侧")}</button>
           <button
             type="button"
             role="menuitem"
             disabled={rightTabIds.length === 0}
             onClick={() => runMenu(() => onCloseTabs(rightTabIds))}
           >
-            关闭右侧
-          </button>
+            {t("关闭右侧")}</button>
           <button type="button" role="menuitem" onClick={() => runMenu(() => onClose(menu.tabId))}>
-            关闭当前
-          </button>
+            {t("关闭当前")}</button>
           <button type="button" role="menuitem" className="danger" onClick={() => runMenu(() => onCloseTabs(tabs.map((tab) => tab.id)))}>
-            全部关闭
-          </button>
+            {t("全部关闭")}</button>
         </div>
       )}
     </header>

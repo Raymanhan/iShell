@@ -5,6 +5,7 @@ import { languageForFile } from "../features/editor/languages";
 import type { SftpEntry } from "../types";
 import { formatBytes } from "../utils/format";
 
+import { t } from "../i18n";
 export interface FileEditorState {
   entry: SftpEntry;
   tabId: string;
@@ -79,29 +80,29 @@ export function FileEditorModal({
             <h2 id="file-editor-title">{editor.entry.name}</h2>
             <p title={editor.entry.path}>{editor.entry.path}</p>
           </div>
-          <button type="button" className="icon-button" onClick={onClose} title="关闭">
+          <button type="button" className="icon-button" onClick={onClose} title={t("关闭")}>
             <X size={16} />
           </button>
         </header>
         {editor.error && <div className="file-editor-error">{editor.error}</div>}
         <div className="file-editor-code" ref={hostRef} aria-busy={editor.loading}>
-          {editor.loading && <div className="file-editor-loading">读取中…</div>}
+          {editor.loading && <div className="file-editor-loading">{t("读取中…")}</div>}
         </div>
         <footer className="file-editor-actions">
-          <span>{editor.loading ? "读取中…" : `${formatBytes(new TextEncoder().encode(editor.content).length)} / 1 MB`}</span>
+          <span>{editor.loading ? t("读取中…") : `${formatBytes(new TextEncoder().encode(editor.content).length)} / 1 MB`}</span>
           <div>
             <button type="button" className="btn-ghost" disabled={editor.saving} onClick={onClose}>
-              取消
+              {t("取消")}
             </button>
             {editor.conflict && (
               <button
                 type="button"
                 className="btn-ghost"
                 disabled={editor.saving}
-                title="远程文件在打开后被修改过，覆盖会丢弃那些修改"
+                title={t("远程文件在打开后被修改过，覆盖会丢弃那些修改")}
                 onClick={onOverwrite}
               >
-                仍然覆盖
+                {t("仍然覆盖")}
               </button>
             )}
             <button
@@ -111,7 +112,7 @@ export function FileEditorModal({
               onClick={onSave}
             >
               <Save size={15} />
-              {editor.saving ? "保存中…" : "保存"}
+              {editor.saving ? t("保存中…") : t("保存")}
             </button>
           </div>
         </footer>

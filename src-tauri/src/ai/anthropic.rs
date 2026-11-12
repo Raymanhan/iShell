@@ -107,6 +107,7 @@ pub fn model_from_api(value: &Value) -> Option<Model> {
             .collect(),
         reasoning_efforts,
         default_reasoning_effort: None,
+        context_window: super::metadata::context_window(value),
         adaptive_thinking: Some(supported("/thinking/types/adaptive/supported")),
         max_output_tokens: value["max_tokens"].as_u64(),
     })
@@ -844,6 +845,7 @@ mod tests {
             name: "Haiku 4.5".into(),
             reasoning_efforts: vec![],
             default_reasoning_effort: None,
+            context_window: None,
             adaptive_thinking: Some(false),
             max_output_tokens: Some(8_000),
         };

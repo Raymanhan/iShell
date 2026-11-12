@@ -61,7 +61,7 @@ export function useAppSettings() {
   );
   const [autoCheckUpdates, setAutoCheckUpdates] = useState(readAutoCheckUpdates);
   const [autoHideTopBar, setAutoHideTopBar] = useState(
-    () => load(AUTO_HIDE_TOP_BAR_KEY) !== "false",
+    () => load(AUTO_HIDE_TOP_BAR_KEY) === "true",
   );
   const [gpuRendering, setGpuRendering] = useState(() => load(GPU_RENDERING_KEY) !== "false");
 

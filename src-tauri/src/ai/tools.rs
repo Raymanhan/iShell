@@ -13,8 +13,8 @@ use tauri::{ipc::Channel, AppHandle};
 
 pub fn definitions() -> Value {
     json!([
-        {"type":"function","function":{"name":"shell","description":"在当前服务器执行非交互 Shell 命令。每次调用是独立进程；指定 cwd。使用 sudo -n；服务使用 systemctl 或重定向后的 nohup。返回真实输出和退出码。","parameters":{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":1800}},"required":["command"]}}},
-        {"type":"function","function":{"name":"run_code","description":"编写并在当前服务器执行 Python、Shell 或 Node.js 代码，适合部署脚本、排查与批量操作。代码存于临时文件，执行后清理。","parameters":{"type":"object","properties":{"language":{"type":"string","enum":["python","shell","javascript"]},"code":{"type":"string"},"cwd":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":1800}},"required":["language","code"]}}},
+        {"type":"function","function":{"name":"shell","description":"在当前服务器执行非交互 Shell 命令。每次调用是独立进程；指定 cwd。使用 sudo -n；服务使用 systemctl 或重定向后的 nohup。返回真实输出和退出码。","parameters":{"type":"object","properties":{"description":{"type":"string","description":"一句话说明这次操作的目的，显示在界面上代替命令标题，例如“检查磁盘占用”。不超过 20 个字，使用与用户相同的语言。"},"command":{"type":"string"},"cwd":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":1800}},"required":["description","command"]}}},
+        {"type":"function","function":{"name":"run_code","description":"编写并在当前服务器执行 Python、Shell 或 Node.js 代码，适合部署脚本、排查与批量操作。代码存于临时文件，执行后清理。","parameters":{"type":"object","properties":{"description":{"type":"string","description":"一句话说明这次操作的目的，显示在界面上代替命令标题，例如“检查磁盘占用”。不超过 20 个字，使用与用户相同的语言。"},"language":{"type":"string","enum":["python","shell","javascript"]},"code":{"type":"string"},"cwd":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":1800}},"required":["description","language","code"]}}},
         {"type":"function","function":{"name":"read_file","description":"读取当前服务器 UTF-8 文本文件，最多 16000 字符；更大的文件可用 shell 分段查看。","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
         {"type":"function","function":{"name":"read_terminal","description":"读取用户当前终端最近的输出（纯文本，最多 2000 行），用于了解用户刚执行的命令及其报错。只读，不在服务器上执行任何操作。","parameters":{"type":"object","properties":{"lines":{"type":"integer","minimum":1,"maximum":2000}}}}},
         {"type":"function","function":{"name":"write_file","description":"在当前服务器创建或完整替换 UTF-8 文件（原子写入）。需先检查现有内容；父目录须已存在。保留现有文件权限，新文件为 0600。","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}}
@@ -90,6 +90,21 @@ pub struct Context {
     pub terminals: Arc<TerminalRegistry>,
     pub cancel: Arc<AtomicBool>,
     pub events: Channel<Event>,
+    /// Set when the call runs without a human decision; the remote runner then
+    /// refuses reads whose real path (after symlinks) looks like a secret.
+    pub guard_sensitive: bool,
+}
+
+/// Poll quickly while output changes, then back off so a quiet long-running
+/// command does not cost an SSH exec and a remote interpreter start every 400 ms.
+pub(crate) fn next_poll_interval(current: Duration, changed: bool) -> Duration {
+    const MIN: Duration = Duration::from_millis(400);
+    const MAX: Duration = Duration::from_millis(2000);
+    if changed {
+        MIN
+    } else {
+        (current + current / 2).clamp(MIN, MAX)
+    }
 }
 
 /// The recent output of the terminal a task is bound to.
@@ -122,19 +137,25 @@ pub fn execute(context: Context, id: String, name: String, args: Value) -> Resul
         terminals,
         cancel,
         events,
+        guard_sensitive,
     } = context;
     if cancel.load(Ordering::Relaxed) || !terminals.connected_to(&session, &server) {
         return Err("已停止或服务器连接已关闭".into());
     }
     let job_id = uuid::Uuid::new_v4().to_string();
+    let mut input = json!({"name":name,"args":args});
+    if guard_sensitive {
+        input["sensitivePatterns"] = json!(super::permissions::SENSITIVE_PATTERNS);
+    }
     job(
         &app,
         &server,
-        json!({"action":"start","job":job_id,"input":{"name":name,"args":args},"runner":include_str!("runner.py")}),
+        json!({"action":"start","job":job_id,"input":input,"runner":include_str!("runner.py")}),
     )?;
     let started = Instant::now();
     let mut previous = Value::Null;
     let mut stopping_since = None;
+    let mut interval = Duration::from_millis(400);
     loop {
         let stopping = cancel.load(Ordering::Relaxed)
             || !terminals.connected_to(&session, &server)
@@ -152,7 +173,8 @@ pub fn execute(context: Context, id: String, name: String, args: Value) -> Resul
                 return Err(format!("工具状态无法获取，无法确认远端是否已停止：{error}"));
             }
         };
-        if state != previous {
+        let changed = state != previous;
+        if changed {
             let _ = events.send(Event::new("tool_output", json!({"id":id,"result":state})));
             previous = state.clone();
         }
@@ -163,16 +185,44 @@ pub fn execute(context: Context, id: String, name: String, args: Value) -> Resul
         if stopping {
             let since = stopping_since.get_or_insert_with(Instant::now);
             if since.elapsed() > Duration::from_secs(15) {
+                // job.py removes stale job directories on later starts.
                 return Err("停止请求已发送，但尚未确认远端进程退出".into());
             }
+            interval = Duration::from_millis(400);
+        } else {
+            interval = next_poll_interval(interval, changed);
         }
-        std::thread::sleep(Duration::from_millis(400));
+        // Sleep in short slices so a stop click is noticed without waiting
+        // for a backed-off poll interval.
+        let wake = Instant::now() + interval;
+        while Instant::now() < wake {
+            if !stopping && cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100).min(wake - Instant::now()));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn polling_backs_off_while_quiet_and_resets_on_output() {
+        let mut interval = Duration::from_millis(400);
+        for _ in 0..10 {
+            interval = next_poll_interval(interval, false);
+        }
+        assert_eq!(interval, Duration::from_millis(2000));
+        assert_eq!(
+            next_poll_interval(interval, true),
+            Duration::from_millis(400)
+        );
+        assert_eq!(
+            next_poll_interval(Duration::from_millis(400), false),
+            Duration::from_millis(600)
+        );
+    }
     #[test]
     fn validate_before_any_remote_execution() {
         assert!(validate(

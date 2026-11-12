@@ -126,18 +126,16 @@ fn backfill_summaries(app: &AppHandle) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
     };
-    for (id, blob) in pending {
+    for (_id, blob) in pending {
         let saved = decrypt_secret(app, &blob)
             .ok()
             .and_then(|json| serde_json::from_str::<Value>(&json).ok());
         match saved.as_ref().map(record) {
             Some(Ok(record)) => store(app, &record)?,
-            // Unreadable with this key or malformed: it could never be opened.
-            _ => {
-                open_db(app)?
-                    .execute("DELETE FROM ai_history WHERE id=?1", [id])
-                    .map_err(|e| e.to_string())?;
-            }
+            // Unreadable with this key or malformed. Leave it untouched:
+            // the key may come back (a locked keychain), and one bad row
+            // must not take the rest of the history with it.
+            _ => continue,
         }
     }
     Ok(())

@@ -22,6 +22,7 @@ import {
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import type { EditorLanguage } from "./languages";
+import { t } from "../../i18n";
 
 /** Each mode is fetched only when a file in that language is opened. */
 const modes: Record<Exclude<EditorLanguage, "plain">, () => Promise<StreamParser<unknown>>> = {
@@ -137,25 +138,26 @@ const theme = EditorView.theme({
   },
 });
 
-/** The editor's interface text in Chinese, like the rest of the app. */
-const phrases = EditorState.phrases.of({
-  Find: "查找",
-  Replace: "替换",
-  next: "下一个",
-  previous: "上一个",
-  all: "全部",
-  "match case": "区分大小写",
-  regexp: "正则",
-  "by word": "全字匹配",
-  replace: "替换",
-  "replace all": "全部替换",
-  close: "关闭",
-  "current match": "当前匹配",
-  "on line": "位于第",
-  "replaced $ matches": "已替换 $ 处",
-  "replaced match on line $": "已替换第 $ 行的匹配",
-  "Go to line": "跳转到行",
-  go: "跳转",
+/** The editor's interface text in the app's language. */
+const phrases = () =>
+  EditorState.phrases.of({
+  Find: t("查找"),
+  Replace: t("替换"),
+  next: t("下一个"),
+  previous: t("上一个"),
+  all: t("全部"),
+  "match case": t("区分大小写"),
+  regexp: t("正则"),
+  "by word": t("全字匹配"),
+  replace: t("替换"),
+  "replace all": t("全部替换"),
+  close: t("关闭"),
+  "current match": t("当前匹配"),
+  "on line": t("位于第"),
+  "replaced $ matches": t("已替换 $ 处"),
+  "replaced match on line $": t("已替换第 $ 行的匹配"),
+  "Go to line": t("跳转到行"),
+  go: t("跳转"),
 });
 
 export interface CodeEditorOptions {
@@ -195,7 +197,7 @@ export function createCodeEditor(parent: HTMLElement, options: CodeEditorOptions
         syntaxHighlighting(highlightStyle),
         theme,
         EditorState.tabSize.of(2),
-        phrases,
+        phrases(),
         language.of([]),
         editable.of(EditorState.readOnly.of(options.readOnly)),
         keymap.of([
@@ -208,7 +210,7 @@ export function createCodeEditor(parent: HTMLElement, options: CodeEditorOptions
         EditorView.updateListener.of((update) => {
           if (update.docChanged) onChange(update.state.doc.toString());
         }),
-        EditorView.contentAttributes.of({ spellcheck: "false", "aria-label": "文件内容" }),
+        EditorView.contentAttributes.of({ spellcheck: "false", "aria-label": t("文件内容") }),
       ],
     }),
   });

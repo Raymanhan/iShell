@@ -674,6 +674,7 @@ fn ai_fanout(app: &AppHandle, ids: &[&str]) {
         "shell",
         &serde_json::json!({"command": "printf '%s' \"${SSH_CONNECTION##* }\""}),
         &chosen,
+        false,
     )
     .unwrap();
 

@@ -1,4 +1,5 @@
 import type { ServerRecord } from "../../types";
+import { msg } from "../../i18n";
 
 /** The server id of local terminal tabs (see `src-tauri/src/local_shell.rs`). */
 export const LOCAL_SERVER_ID = "local";
@@ -9,7 +10,7 @@ export const LOCAL_SERVER_ID = "local";
  */
 export const LOCAL_SERVER: ServerRecord = {
   id: LOCAL_SERVER_ID,
-  name: "本地终端",
+  name: msg("本地终端"),
   host: "localhost",
   port: 0,
   username: "",

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { translateMessage } from "../i18n";
 import type { CommandArgs, CommandName, CommandResult } from "./commands";
 
 export const isTauri =
@@ -7,21 +8,30 @@ export const isTauri =
 
 /**
  * A command that failed. `code` is "error" unless the backend named the
- * failure (see `src-tauri/src/error.rs`). `String(error)` gives the message,
- * so code that only shows errors needs no changes.
+ * failure (see `src-tauri/src/error.rs`). The backend reports errors in
+ * Simplified Chinese; `message` (and therefore `String(error)`) is translated
+ * into the UI language, while `raw` keeps the original text for code that
+ * recognizes specific backend errors.
  */
 export class CommandError extends Error {
   readonly code: string;
+  readonly raw: string;
 
-  constructor(message: string, code = "error") {
-    super(message);
+  constructor(raw: string, code = "error") {
+    super(translateMessage(raw));
     this.name = "CommandError";
+    this.raw = raw;
     this.code = code;
   }
 
   override toString(): string {
     return this.message;
   }
+}
+
+/** The untranslated backend text of an error, for matching known errors. */
+export function rawMessage(error: unknown): string {
+  return error instanceof CommandError ? error.raw : String(error);
 }
 
 /** Codes the backend uses for failures the frontend reacts to. */
@@ -37,6 +47,7 @@ export function toCommandError(raw: unknown): CommandError {
     const { message, code } = raw as { message: string; code?: unknown };
     return new CommandError(message, typeof code === "string" ? code : "error");
   }
+  if (raw instanceof Error) return new CommandError(raw.message);
   return new CommandError(String(raw));
 }
 

@@ -57,6 +57,15 @@ export interface ChatInput {
   targets?: { serverId: string; sessionId: string }[];
 }
 
+export interface CompactInput {
+  requestId: string;
+  serverId: string;
+  model: string;
+  /** Text after `/compact`: what the summary should retain. */
+  focus: string;
+  messages: Record<string, unknown>[];
+}
+
 export interface ChatResult {
   messages: Record<string, unknown>[];
   stopped: boolean;
@@ -86,6 +95,7 @@ export interface CommandMap {
   ai_save_history: { args: { input: AiConversation }; result: void };
   ai_delete_history: { args: { id: string }; result: void };
   ai_chat: { args: { input: ChatInput; onEvent: Channel<AiEvent> }; result: ChatResult };
+  ai_compact: { args: { input: CompactInput; onEvent: Channel<AiEvent> }; result: ChatResult };
   ai_suggest_command: {
     args: {
       input: { serverId: string; sessionId: string; model: string; effort: string; request: string };

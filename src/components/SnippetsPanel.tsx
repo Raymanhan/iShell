@@ -3,6 +3,7 @@ import { CornerDownLeft, Pencil, Plus, Search, SquareCode, Trash2, Type } from "
 import { fillSnippet, snippetVariables } from "../features/snippets/variables";
 import type { Snippet, SnippetInput } from "../types";
 
+import { t } from "../i18n";
 const emptyDraft: SnippetInput = { id: null, name: "", command: "", description: "", run: true };
 
 /** Saved commands for the side panel: click one to send it to the focused terminal. */
@@ -88,7 +89,7 @@ export function SnippetsPanel({
     event.preventDefault();
     if (!draft || saving) return;
     if (!draft.command.trim()) {
-      setError("命令不能为空");
+      setError(t("命令不能为空"));
       return;
     }
     setSaving(true);
@@ -104,22 +105,22 @@ export function SnippetsPanel({
   }
 
   return (
-    <section className="history-panel snippets-panel" aria-label="命令片段">
+    <section className="history-panel snippets-panel" aria-label={t("命令片段")}>
       <div className="snippets-toolbar">
         <label className="history-search">
           <Search size={13} />
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索片段"
+            placeholder={t("搜索片段")}
             spellCheck={false}
           />
         </label>
         <button
           type="button"
           className="snippets-add"
-          title="新建片段"
-          aria-label="新建片段"
+          title={t("新建片段")}
+          aria-label={t("新建片段")}
           onClick={() => {
             setError(null);
             setDraft(emptyDraft);
@@ -133,14 +134,14 @@ export function SnippetsPanel({
         <form className="snippet-editor" onSubmit={submit}>
           <input
             value={draft.name}
-            placeholder="名称（可选）"
-            aria-label="名称"
+            placeholder={t("名称（可选）")}
+            aria-label={t("名称")}
             onChange={(event) => setDraft({ ...draft, name: event.target.value })}
           />
           <textarea
             value={draft.command}
-            placeholder={"命令，可多行；{{名称}} 或 {{名称:默认值}} 为发送时填写的变量\n例如：sudo systemctl restart {{服务:nginx}}"}
-            aria-label="命令"
+            placeholder={t("命令，可多行；{{名称}} 或 {{名称:默认值}} 为发送时填写的变量\n例如：sudo systemctl restart {{服务:nginx}}")}
+            aria-label={t("命令")}
             rows={4}
             spellCheck={false}
             autoFocus
@@ -151,8 +152,8 @@ export function SnippetsPanel({
           />
           <input
             value={draft.description}
-            placeholder="说明（可选）"
-            aria-label="说明"
+            placeholder={t("说明（可选）")}
+            aria-label={t("说明")}
             onChange={(event) => setDraft({ ...draft, description: event.target.value })}
           />
           <label className="snippet-run-toggle">
@@ -161,15 +162,13 @@ export function SnippetsPanel({
               checked={draft.run}
               onChange={(event) => setDraft({ ...draft, run: event.target.checked })}
             />
-            发送后立即执行（自动回车）
-          </label>
+            {t("发送后立即执行（自动回车）")}</label>
           {error && <div className="snippet-error">{error}</div>}
           <div className="snippet-editor-actions">
             <button type="button" className="btn-ghost" onClick={() => setDraft(null)}>
-              取消
-            </button>
+              {t("取消")}</button>
             <button type="submit" className="solid-button" disabled={saving}>
-              {saving ? "保存中…" : "保存"}
+              {saving ? t("保存中…") : t("保存")}
             </button>
           </div>
         </form>
@@ -185,7 +184,7 @@ export function SnippetsPanel({
                 value={value}
                 autoFocus={index === 0}
                 spellCheck={false}
-                aria-label={`变量 ${name}`}
+                aria-label={t("变量 {0}", name)}
                 onChange={(event) =>
                   setFilling({ ...filling, error: null, values: { ...filling.values, [name]: event.target.value } })
                 }
@@ -204,10 +203,10 @@ export function SnippetsPanel({
           {filling.error && <div className="snippet-error">{filling.error}</div>}
           <div className="snippet-editor-actions">
             <button type="button" className="btn-ghost" onClick={() => setFilling(null)}>
-              取消
+              {t("取消")}
             </button>
             <button type="submit" className="solid-button">
-              {filling.snippet.run ? "发送并执行" : "发送"}
+              {filling.snippet.run ? t("发送并执行") : t("发送")}
             </button>
           </div>
         </form>
@@ -221,7 +220,7 @@ export function SnippetsPanel({
                 type="button"
                 className="snippet-send"
                 onClick={() => send(snippet)}
-                title={snippet.run ? "发送并执行" : "发送到终端（不执行）"}
+                title={snippet.run ? t("发送并执行") : t("发送到终端（不执行）")}
               >
                 <span className="snippet-name">
                   {snippet.run ? <CornerDownLeft size={12} /> : <Type size={12} />}
@@ -231,13 +230,13 @@ export function SnippetsPanel({
                 {snippet.description && <span className="snippet-description">{snippet.description}</span>}
               </button>
               <div className="snippet-actions">
-                <button type="button" title="编辑" aria-label={`编辑 ${snippet.name}`} onClick={() => edit(snippet)}>
+                <button type="button" title={t("编辑")} aria-label={t("编辑 {0}", snippet.name)} onClick={() => edit(snippet)}>
                   <Pencil size={12} />
                 </button>
                 <button
                   type="button"
-                  title="删除"
-                  aria-label={`删除 ${snippet.name}`}
+                  title={t("删除")}
+                  aria-label={t("删除 {0}", snippet.name)}
                   className="danger"
                   onClick={() => onDelete(snippet)}
                 >
@@ -249,13 +248,13 @@ export function SnippetsPanel({
         ) : (
           <div className="history-empty">
             <SquareCode size={16} />
-            <span>{snippets.length === 0 ? "还没有片段，点 + 保存常用命令" : "没有匹配的片段"}</span>
+            <span>{snippets.length === 0 ? t("还没有片段，点 + 保存常用命令") : t("没有匹配的片段")}</span>
           </div>
         )}
       </div>
 
       <p className="snippets-hint">
-        {broadcasting ? "广播已开启：片段会发送到所有广播会话" : "点击片段发送到当前终端"}
+        {broadcasting ? t("广播已开启：片段会发送到所有广播会话") : t("点击片段发送到当前终端")}
       </p>
     </section>
   );

@@ -7,6 +7,15 @@
   color: var(--text);
   font-size: 12px;
 }
+.status-panel-content > .ai-panel {
+  flex: 1 1 0;
+  height: auto;
+}
+.ai-head,
+.ai-target,
+.ai-foot {
+  flex: 0 0 auto;
+}
 .ai-head {
   display: flex;
   align-items: center;
@@ -137,7 +146,7 @@
   color: var(--bad);
 }
 .ai-messages {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   overflow: auto;
   padding: 15px 14px;
@@ -223,6 +232,89 @@
 .ai-message.user p {
   margin: 0;
   white-space: pre-wrap;
+}
+/* Copy / edit float on the bubble's lower edge while it is hovered. */
+.ai-message.user {
+  position: relative;
+}
+.ai-message-actions {
+  position: absolute;
+  right: 8px;
+  bottom: -13px;
+  display: flex;
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--hairline-2);
+  border-radius: 7px;
+  background: var(--panel);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms;
+}
+.ai-message.user:hover .ai-message-actions,
+.ai-message-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+.ai-message-actions .ai-icon {
+  width: 22px;
+  height: 22px;
+}
+.ai-message-actions .ai-icon:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ai-message-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-left: 0;
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.45);
+}
+.ai-message-editor textarea {
+  width: 100%;
+  min-height: 40px;
+  max-height: 240px;
+  padding: 0;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.65;
+}
+.ai-message-editor textarea:focus-visible {
+  outline: none;
+}
+.ai-message-editor small {
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.ai-message-editor > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.ai-message-editor button {
+  padding: 4px 11px;
+  border: 1px solid var(--hairline-2);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ai-message-editor button[type="submit"] {
+  border-color: transparent;
+  background: var(--solid-bg, #f0f1f5);
+  color: var(--solid-text, #1f2025);
+}
+.ai-message-editor button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .ai-markdown > :first-child {
   margin-top: 0;
@@ -320,12 +412,26 @@
   display: none;
 }
 .ai-tool summary > strong {
+  min-width: 0;
+  overflow: hidden;
   font-weight: 550;
   color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A bare command, when the model gave no description. */
+.ai-tool summary > strong.literal {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
 }
 .ai-tool summary > span {
+  flex-shrink: 0;
   margin-left: auto;
   font-size: 10px;
+}
+.ai-tool summary > svg {
+  flex-shrink: 0;
 }
 .ai-tool summary > svg:first-child {
   color: var(--vivid-green);
@@ -333,6 +439,9 @@
 }
 .ai-tool.failed summary > svg:first-child {
   color: var(--danger);
+}
+.ai-tool.neutral summary > svg:first-child {
+  color: var(--faint);
 }
 .ai-tool summary > svg:last-child {
   transition: transform 100ms;
@@ -398,6 +507,30 @@
   font-size: 11px;
   line-height: 1.6;
 }
+/* Older blocks of a long conversation load from here, page by page. */
+.ai-earlier {
+  display: flex;
+  justify-content: center;
+  margin: 4px 0 14px;
+}
+.ai-earlier button {
+  padding: 4px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+.ai-earlier button:hover {
+  color: var(--text);
+  border-color: rgba(var(--accent-rgb), 0.45);
+}
+.ai-earlier button:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.6);
+  outline-offset: 2px;
+}
 .ai-working {
   display: flex;
   align-items: center;
@@ -405,6 +538,69 @@
   margin: 12px 0;
   color: var(--dim);
   font-size: 11px;
+}
+/* A highlight sweeps across the status text while the assistant works. */
+.ai-working:not(.awaiting) .ai-working-text {
+  background: linear-gradient(
+      90deg,
+      var(--faint) 0%,
+      var(--faint) 38%,
+      var(--text) 50%,
+      var(--faint) 62%,
+      var(--faint) 100%
+    )
+    0 0 / 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: ai-shimmer 1.8s linear infinite;
+}
+@keyframes ai-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+.ai-working.awaiting {
+  color: var(--vivid-orange);
+}
+/* Consecutive tool calls form one list, divided by hairlines. */
+.ai-tool-group {
+  margin: 7px 0 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  overflow: hidden;
+}
+.ai-tool-group > .ai-tool {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+.ai-tool-group > .ai-tool + .ai-tool {
+  border-top: 1px solid var(--hairline);
+}
+.ai-tool-group > .ai-tool.failed {
+  background: rgba(255, 90, 90, 0.05);
+}
+.ai-tool-group > .ai-tool.awaiting {
+  background: rgba(255, 159, 10, 0.07);
+  box-shadow: inset 2px 0 0 var(--vivid-orange);
+}
+/* New steps rise into place instead of popping in. */
+.ai-enter {
+  animation: ai-rise 260ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes ai-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 .ai-spin {
   animation: ai-spin 1s linear infinite;
@@ -422,6 +618,93 @@
   border-radius: 14px;
   background: var(--surface-soft-bg);
   box-shadow: 0 3px 12px rgba(0, 0, 0, 0.06);
+}
+/* Slash-command menu, floating above the composer. */
+.ai-composer {
+  position: relative;
+}
+.ai-command-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 5;
+  display: grid;
+  gap: 1px;
+  padding: 5px;
+  border: 1px solid var(--hairline-2);
+  border-radius: 12px;
+  animation: ai-rise 140ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+/*
+ * Layers that float over the chat (command menu, history, manual model
+ * entry, scroll-to-latest) are nearly opaque: the theme panels are
+ * translucent, and the conversation behind would show through them.
+ */
+.ai-command-menu,
+.ai-panel .ai-history,
+.ai-panel .ai-manual-editor,
+.ai-panel .ai-scroll-bottom {
+  background: rgba(22, 24, 29, 0.96);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  backdrop-filter: blur(24px) saturate(140%);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.38);
+}
+:root:is(
+    [data-theme="liquid-glass-pearl"],
+    [data-theme="liquid-glass-cloud"],
+    [data-theme="liquid-glass-clay-light"]
+  )
+  :is(
+    .ai-command-menu,
+    .ai-panel .ai-history,
+    .ai-panel .ai-manual-editor,
+    .ai-panel .ai-scroll-bottom
+  ) {
+  border-color: rgba(0, 0, 0, 0.1);
+  background: rgba(252, 251, 248, 0.97);
+  box-shadow: 0 14px 36px rgba(40, 36, 30, 0.16);
+}
+:root:is(
+    [data-theme="liquid-glass-pearl"],
+    [data-theme="liquid-glass-cloud"],
+    [data-theme="liquid-glass-clay-light"]
+  )
+  .ai-command-menu
+  > [role="option"].active {
+  background: rgba(0, 0, 0, 0.06);
+}
+.ai-command-menu > [role="option"] {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  padding: 7px 9px;
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+}
+.ai-command-menu > [role="option"].active {
+  background: var(--control-hover-bg);
+}
+.ai-command-name {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.ai-command-name em {
+  margin-left: 6px;
+  color: var(--faint);
+  font-style: normal;
+}
+.ai-command-description {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ai-composer:focus-within {
   border-color: rgba(var(--accent-rgb), 0.5);
@@ -582,15 +865,29 @@
   font-size: 10.5px;
   cursor: pointer;
 }
+.ai-settings-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.ai-settings-head .settings-section-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .ai-settings .ai-save {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  justify-self: end;
   padding: 8px 15px;
   font: inherit;
   font-size: 12px;
+  white-space: nowrap;
+}
+.ai-settings .ai-error {
+  margin: 0;
 }
 .ai-settings-notice {
   color: var(--vivid-green);
@@ -602,30 +899,20 @@
   .ai-spin {
     animation-duration: 2s;
   }
+  .ai-enter,
+  .ai-command-menu {
+    animation: none;
+  }
+  .ai-working:not(.awaiting) .ai-working-text {
+    animation: none;
+    background: none;
+    color: var(--dim);
+  }
 }
 .ai-tool.awaiting {
   border-color: rgba(255, 159, 10, 0.5);
 }
 .ai-tool.awaiting summary > svg:first-child {
-  color: var(--vivid-orange);
-}
-.ai-risk {
-  display: flex;
-  gap: 7px;
-  padding: 0 10px 8px;
-  font-size: 10px;
-  line-height: 1.6;
-  color: var(--dim);
-}
-.ai-risk strong {
-  flex-shrink: 0;
-  font-weight: 550;
-  color: var(--vivid-green);
-}
-.ai-risk.high strong {
-  color: var(--danger);
-}
-.ai-risk.medium strong {
   color: var(--vivid-orange);
 }
 .ai-approval {
@@ -659,29 +946,70 @@
   border-color: transparent;
   color: var(--solid-text, #1f2025);
 }
-.ai-permission-control {
+/*
+ * Model, effort and permission pickers: fixed-width chips with the arrow
+ * drawn by us, so every platform shows the same compact control instead of
+ * a native select whose arrow drifts to the far edge of a stretched box.
+ */
+.ai-select {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  flex: 0 1 105px;
   min-width: 0;
+  height: 26px;
+  border-radius: 7px;
   color: var(--dim);
 }
-.ai-permission-control > svg {
+.ai-select:hover,
+.ai-select:focus-within {
+  background: var(--control-hover-bg);
+  color: var(--text);
+}
+.ai-select > svg {
+  position: absolute;
   flex: 0 0 auto;
+  pointer-events: none;
+  opacity: 0.75;
 }
-.ai-composer-controls > select[aria-label="AI 模型"] {
-  flex: 1 1 70px;
-  max-width: none;
-}
-.ai-composer-controls > select[aria-label="思考程度"] {
-  flex: 0 1 64px;
-  max-width: 22%;
-}
-.ai-permission-control select {
+.ai-composer-controls .ai-select select {
+  flex: 1 1 auto;
   width: 100%;
   max-width: none;
-  font-size: 10px;
+  height: 100%;
+  padding: 0 16px 0 6px;
+  -webkit-appearance: none;
+  appearance: none;
+  color: inherit;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ai-composer-controls .ai-select select:focus-visible {
+  outline: 1px solid rgba(var(--accent-rgb), 0.55);
+  outline-offset: -1px;
+}
+/* Fixed widths; when the panel is narrow the model name gives way first. */
+.ai-select-model {
+  flex: 0 1 132px;
+  min-width: 64px;
+}
+.ai-select-effort {
+  flex: 0 0 58px;
+}
+.ai-select-permission {
+  flex: 0 0.3 100px;
+  min-width: 80px;
+}
+.ai-select > svg:last-child {
+  right: 4px;
+}
+/* The shield sits inside the chip, ahead of the label. */
+.ai-select-permission > svg:first-child {
+  position: absolute;
+  left: 6px;
+}
+.ai-composer-controls .ai-select-permission select {
+  padding-left: 21px;
 }
 .ai-foot {
   display: flex;

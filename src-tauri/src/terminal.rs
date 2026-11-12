@@ -43,6 +43,7 @@ use crate::openssh;
 #[cfg(not(russh_backend))]
 use crate::store::jump_hops;
 use crate::store::{get_server, mark_connected, read_secret};
+use crate::telemetry::{self, EventKind};
 
 pub const FRAME_DATA: u8 = 0;
 pub const FRAME_READY: u8 = 1;
@@ -183,6 +184,11 @@ impl TerminalRegistry {
         });
     }
 
+    fn was_ready(&self, session_id: &str) -> bool {
+        self.with_session(session_id, |session| session.ready)
+            .unwrap_or(false)
+    }
+
     /// The session ended on its own. It stays registered, so a pane that
     /// attaches later still shows its output and why it ended, until closed.
     fn mark_closed(&self, session_id: &str, reason: String) {
@@ -265,14 +271,18 @@ pub fn open_terminal(
 
     let thread_registry = registry.clone();
     let thread_session_id = session_id.clone();
+    let thread_app = app.clone();
     thread::spawn(move || {
         let result = run_terminal_thread(
             app,
             thread_registry.clone(),
             thread_session_id.clone(),
-            server_id,
+            server_id.clone(),
             receiver,
         );
+        if result.is_err() && !thread_registry.was_ready(&thread_session_id) {
+            telemetry::record(&thread_app, EventKind::SshLogin, Some(&server_id), false);
+        }
         let reason = result.err().unwrap_or_else(|| "终端已关闭".to_string());
         thread_registry.mark_closed(&thread_session_id, reason);
     });
@@ -678,10 +688,22 @@ fn run_terminal_thread(
                         if tail.contains(CONNECTED_MARKER) {
                             connected_seen = true;
                             mark_connected(&read_app, &read_server_id).ok();
+                            telemetry::record(
+                                &read_app,
+                                EventKind::SshLogin,
+                                Some(&read_server_id),
+                                true,
+                            );
                             read_registry.mark_ready(&read_session_id);
                         } else if looks_like_shell_ready(&tail) {
                             connected_seen = true;
                             mark_connected(&read_app, &read_server_id).ok();
+                            telemetry::record(
+                                &read_app,
+                                EventKind::SshLogin,
+                                Some(&read_server_id),
+                                true,
+                            );
                             read_registry.mark_ready(&read_session_id);
                             read_registry.output(&read_session_id, data);
                             read_registry.output(
@@ -782,6 +804,7 @@ fn run_terminal_thread(
     let ready_session_id = session_id.clone();
     let on_ready = move || {
         mark_connected(&app, &server_id).ok();
+        telemetry::record(&app, EventKind::SshLogin, Some(&server_id), true);
         ready_registry.mark_ready(&ready_session_id);
         ready_registry.output(&ready_session_id, b"\r\n[iShell] connected via russh\r\n");
     };

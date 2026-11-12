@@ -41,6 +41,7 @@ use crate::{
         save_snippet as store_snippet, upsert_server, validate_server,
     },
     tail_monitor::TailMonitorRegistry,
+    telemetry::{self, EventKind},
     terminal::{self, TerminalRegistry},
     time::now,
     tunnel::TunnelRegistry,
@@ -308,6 +309,7 @@ pub fn save_server(
     let secret = password.as_deref().filter(|value| !value.is_empty());
     upsert_server(&app, &record, secret)?;
     pool.invalidate(&record.id);
+    telemetry::record(&app, EventKind::ServerSaved, Some(&record.id), true);
 
     Ok(record)
 }
@@ -426,7 +428,12 @@ pub fn delete_server(
         tunnels.stop(&app, &forward.id);
     }
     pool.invalidate(&id);
-    remove_server(&app, &id)
+    telemetry::observe(
+        &app,
+        EventKind::ServerDeleted,
+        Some(&id),
+        remove_server(&app, &id),
+    )
 }
 
 #[tauri::command]
@@ -596,7 +603,12 @@ pub async fn test_server_connection(
     password: Option<String>,
 ) -> Result<(), String> {
     validate_server(&input)?;
-    run_blocking(move || test_connection(&app, input, password)).await
+    run_blocking(move || {
+        let id = input.id.clone();
+        let result = test_connection(&app, input, password);
+        telemetry::observe(&app, EventKind::SshTest, id.as_deref(), result)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -640,7 +652,7 @@ pub async fn sftp_download(
         let is_canceled = || cancels.is_canceled(&transfer_id);
         let result = download_file(&pool, &app, &id, &path, &transfer_id, &is_canceled);
         cancels.clear(&transfer_id);
-        result
+        telemetry::observe(&app, EventKind::SftpDownload, Some(&id), result)
     })
     .await
 }
@@ -662,7 +674,7 @@ pub async fn sftp_download_folder(
         let is_canceled = || cancels.is_canceled(&transfer_id);
         let result = download_folder(&pool, &app, &id, &path, &transfer_id, &mode, &is_canceled);
         cancels.clear(&transfer_id);
-        result
+        telemetry::observe(&app, EventKind::SftpDownload, Some(&id), result)
     })
     .await
 }
@@ -715,7 +727,7 @@ pub async fn sftp_upload(
                 }
             });
         cancels.clear(&transfer_id);
-        result
+        telemetry::observe(&app, EventKind::SftpUpload, Some(&id), result)
     })
     .await
 }
@@ -738,7 +750,11 @@ pub async fn sftp_mkdir(
     path: String,
 ) -> Result<(), String> {
     let pool = pool.inner().clone();
-    run_blocking(move || make_directory(&pool, &app, &id, &path)).await
+    run_blocking(move || {
+        let result = make_directory(&pool, &app, &id, &path);
+        telemetry::observe(&app, EventKind::SftpMkdir, Some(&id), result)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -750,7 +766,11 @@ pub async fn sftp_remove(
     is_dir: bool,
 ) -> Result<(), String> {
     let pool = pool.inner().clone();
-    run_blocking(move || remove_entry(&pool, &app, &id, &path, is_dir)).await
+    run_blocking(move || {
+        let result = remove_entry(&pool, &app, &id, &path, is_dir);
+        telemetry::observe(&app, EventKind::SftpRemove, Some(&id), result)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -762,7 +782,11 @@ pub async fn sftp_rename(
     to: String,
 ) -> Result<(), String> {
     let pool = pool.inner().clone();
-    run_blocking(move || rename_entry(&pool, &app, &id, &from, &to)).await
+    run_blocking(move || {
+        let result = rename_entry(&pool, &app, &id, &from, &to);
+        telemetry::observe(&app, EventKind::SftpRename, Some(&id), result)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -789,14 +813,15 @@ pub async fn sftp_write_text_file(
 ) -> AppResult<String> {
     let pool = pool.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        write_text_file(
+        let result = write_text_file(
             &pool,
             &app,
             &id,
             &path,
             &content,
             expected_revision.as_deref(),
-        )
+        );
+        telemetry::observe(&app, EventKind::SftpWrite, Some(&id), result)
     })
     .await
     .map_err(|err| format!("后台任务失败：{err}"))?

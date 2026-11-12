@@ -1,7 +1,9 @@
 /**
  * Snippet variables: `{{name}}` or `{{name:default}}` in a snippet's command,
- * filled in when it is sent. Pure helpers, free of imports for the tests.
+ * filled in when it is sent. Pure helpers; they import only i18n, so the
+ * tests can load them.
  */
+import { t } from "../../i18n";
 
 export interface SnippetVariable {
   name: string;
@@ -29,7 +31,7 @@ export function snippetVariables(command: string): SnippetVariable[] {
  */
 export function fillSnippet(command: string, values: Record<string, string>): string {
   for (const [name, value] of Object.entries(values)) {
-    if (/[\r\n]/.test(value)) throw new Error(`变量 ${name} 不能包含换行`);
+    if (/[\r\n]/.test(value)) throw new Error(t("变量 {0} 不能包含换行", name));
   }
   return command.replace(PATTERN, (_, name: string, fallback?: string) => values[name] ?? fallback ?? "");
 }

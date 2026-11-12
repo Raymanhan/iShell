@@ -27,6 +27,8 @@ import {
   TerminalOutput,
 } from "../features/shell/terminalStream";
 
+import { t, translateMessage } from "../i18n";
+import { useLocale } from "../i18n/useLocale";
 const passwordPromptPattern = /(?:password|passphrase|密码|口令)[^:\n\r]*[:：]\s*$/i;
 const platformSource = `${navigator.userAgent} ${navigator.platform}`.toLowerCase();
 const isWindowsPlatform = platformSource.includes("win");
@@ -116,10 +118,12 @@ function TerminalPaneBase({
   /** Where the pane registers a function that types into it, for broadcasts from other panes. */
   inputRegistry?: Map<string, (data: string) => void>;
 }) {
+  // Re-render on language changes (memoized or a window root).
+  useLocale();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const themeRef = useRef(theme);
-  const fitRef = useRef<FitAddon | null>(null);
+  const requestFitRef = useRef<(() => void) | null>(null);
   const sessionRef = useRef<string | null>(tab.sessionId);
   const closedSessionRef = useRef<string | null>(null);
   const readySessionRef = useRef<string | null>(null);
@@ -226,7 +230,7 @@ function TerminalPaneBase({
       saveFile: (name, chunks) => saveReceivedFile(name, chunks),
       onActiveChange: (active) => {
         if (active) {
-          terminalRef.current?.write("\r\n[iShell] ZMODEM 传输开始，按 Ctrl+C 取消");
+          terminalRef.current?.write(`\r\n[iShell] ${t("ZMODEM 传输开始，按 Ctrl+C 取消")}`);
           return;
         }
         terminalRef.current?.write("\r\n");
@@ -464,20 +468,20 @@ function TerminalPaneBase({
     const sessionId = sessionRef.current;
     if (!suggest) return;
     suggestingRef.current = true;
-    setNotice("AI 正在生成命令…");
+    setNotice(t("AI 正在生成命令…"));
     try {
       const commandText = cleanSuggestedCommand(await suggest(request));
       // The user may have switched sessions or typed on meanwhile.
       if (sessionRef.current !== sessionId || currentAiRequest() !== request) return;
       if (!commandText) {
-        setNotice("AI 没有给出命令");
+        setNotice(t("AI 没有给出命令"));
         return;
       }
       // Ctrl+U clears the line; the command is typed but not submitted.
       rawSendTerminalInput(`\x15${commandText}`, false);
-      setNotice(commandText.startsWith("#") ? "AI 未给出可执行命令，说明已放在命令行" : "命令已填入，确认后按回车执行");
+      setNotice(commandText.startsWith("#") ? t("AI 未给出可执行命令，说明已放在命令行") : t("命令已填入，确认后按回车执行"));
     } catch (error) {
-      setNotice(`生成命令失败：${String(error)}`);
+      setNotice(t("生成命令失败：{0}", String(error)));
     } finally {
       suggestingRef.current = false;
     }
@@ -642,7 +646,7 @@ function TerminalPaneBase({
       if (event.key.toLowerCase() === "c") {
         const selection = terminal.getSelection();
         if (selection) {
-          navigator.clipboard.writeText(selection).catch((error) => setNotice(`复制失败：${String(error)}`));
+          navigator.clipboard.writeText(selection).catch((error) => setNotice(t("复制失败：{0}", String(error))));
         }
         event.preventDefault();
         return false;
@@ -656,7 +660,7 @@ function TerminalPaneBase({
             closeHistorySuggest();
             rawSendTerminalInput(text);
           })
-          .catch((error) => setNotice(`粘贴失败：${String(error)}`));
+          .catch((error) => setNotice(t("粘贴失败：{0}", String(error))));
         event.preventDefault();
         return false;
       }
@@ -666,19 +670,32 @@ function TerminalPaneBase({
 
     terminal.onData((data) => sendTerminalInput(data));
 
+    let disposed = false;
+    let fitFrame = 0;
+    let settledFrame = 0;
     const fitWhenVisible = () => {
       // Skip while hidden (display:none) — the container has no size then.
-      if (containerRef.current?.offsetParent === null) return;
-      requestAnimationFrame(() => {
+      if (disposed || containerRef.current?.offsetParent === null) return;
+      cancelAnimationFrame(fitFrame);
+      cancelAnimationFrame(settledFrame);
+      fitFrame = requestAnimationFrame(() => {
+        if (
+          disposed ||
+          !containerRef.current?.clientWidth ||
+          !containerRef.current?.clientHeight
+        ) return;
         fit.fit();
         reportTerminalSize();
-        requestAnimationFrame(() => {
+        settledFrame = requestAnimationFrame(() => {
+          if (disposed || containerRef.current?.offsetParent === null) return;
           fit.fit();
           reportTerminalSize();
+          terminal.refresh(0, terminal.rows - 1);
         });
       });
     };
     const refit = () => {
+      if (disposed) return;
       if (fitTimerRef.current !== null) window.clearTimeout(fitTimerRef.current);
       if (fitSettledTimerRef.current !== null) window.clearTimeout(fitSettledTimerRef.current);
       fitTimerRef.current = window.setTimeout(() => {
@@ -690,17 +707,46 @@ function TerminalPaneBase({
         fitWhenVisible();
       }, 210);
     };
+    requestFitRef.current = refit;
+    const onVisible = () => {
+      if (!document.hidden) refit();
+    };
+    const layoutRoot = containerRef.current.closest(".workbench-body");
+    const onTransitionEnd = (event: Event) => {
+      if (
+        !(event.target instanceof Element) ||
+        !event.target.matches(".connection-manager, .status-panel, .files-region, .terminal-region")
+      ) return;
+      const property = (event as TransitionEvent).propertyName;
+      if (/^(width|height|flex-basis|margin|padding|transform)/.test(property)) refit();
+    };
     window.addEventListener("resize", refit);
+    window.addEventListener("focus", refit);
+    window.addEventListener("pageshow", refit);
+    document.addEventListener("visibilitychange", onVisible);
+    document.fonts?.addEventListener("loadingdone", refit);
+    void document.fonts?.ready.then(refit);
+    layoutRoot?.addEventListener("transitionend", onTransitionEnd);
     // Refit when the container itself resizes (e.g. dragging the file dock).
     const observer = new ResizeObserver(refit);
     observer.observe(containerRef.current);
+    if (containerRef.current.parentElement) observer.observe(containerRef.current.parentElement);
 
     terminalRef.current = terminal;
-    fitRef.current = fit;
     setSearchAddon(search);
+    refit();
 
     return () => {
+      disposed = true;
+      requestFitRef.current = null;
+      cancelAnimationFrame(fitFrame);
+      cancelAnimationFrame(settledFrame);
       window.removeEventListener("resize", refit);
+      window.removeEventListener("focus", refit);
+      window.removeEventListener("pageshow", refit);
+      document.removeEventListener("visibilitychange", onVisible);
+      document.fonts?.removeEventListener("loadingdone", refit);
+      layoutRoot?.removeEventListener("transitionend", onTransitionEnd);
       if (fitTimerRef.current !== null) window.clearTimeout(fitTimerRef.current);
       if (fitSettledTimerRef.current !== null) window.clearTimeout(fitSettledTimerRef.current);
       observer.disconnect();
@@ -724,7 +770,7 @@ function TerminalPaneBase({
       commandRequest.requirePromptStart &&
       (sensitiveInputRef.current || commandDraftRef.current.length > 0 || !isAtShellPromptCommandStart())
     ) {
-      setNotice(commandRequest.blockedNotice ?? "终端当前不在普通命令行状态，已取消操作");
+      setNotice(commandRequest.blockedNotice ?? t("终端当前不在普通命令行状态，已取消操作"));
       return;
     }
     terminalRef.current?.focus();
@@ -744,15 +790,13 @@ function TerminalPaneBase({
     themeRef.current = theme;
     if (!terminalRef.current) return;
     terminalRef.current.options.theme = getTerminalTheme(theme);
+    requestFitRef.current?.();
   }, [theme]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
     terminalRef.current.options.fontSize = fontSize;
-    requestAnimationFrame(() => {
-      fitRef.current?.fit();
-      reportTerminalSize();
-    });
+    requestFitRef.current?.();
   }, [fontSize]);
 
   // Each pane subscribes to its session with a channel of its own. Attaching
@@ -770,7 +814,7 @@ function TerminalPaneBase({
       if (frame.kind === FRAME_DATA) writeTerminalBytes(sessionId, frame.offset, frame.payload);
       else if (frame.kind === FRAME_READY) markReady(sessionId);
       else if (frame.kind === FRAME_CLOSED)
-        showClosed(sessionId, new TextDecoder().decode(frame.payload));
+        showClosed(sessionId, translateMessage(new TextDecoder().decode(frame.payload)));
     };
     command("attach_terminal", { sessionId, onOutput: channel })
       .then((encoding) => {
@@ -809,23 +853,8 @@ function TerminalPaneBase({
   }, [tab.sessionId, tab.state, tab.title]);
 
   useEffect(() => {
-    if (visible) {
-      window.setTimeout(() => {
-        fitRef.current?.fit();
-        reportTerminalSize();
-      }, 120);
-    }
-  }, [visible]);
-
-  useEffect(() => {
     if (!visible) return;
-    const timers = [0, 40, 120, 240].map((delay) =>
-      window.setTimeout(() => {
-        fitRef.current?.fit();
-        reportTerminalSize();
-      }, delay),
-    );
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
+    requestFitRef.current?.();
   }, [layoutSignal, visible]);
 
   useEffect(() => {
@@ -872,10 +901,10 @@ function TerminalPaneBase({
             className="terminal-history-suggest"
             style={{ left: historySuggest.x, top: historySuggest.y, maxHeight: historySuggest.maxHeight }}
             role="listbox"
-            aria-label="历史命令候选"
+            aria-label={t("历史命令候选")}
           >
             <div className="terminal-history-suggest-head">
-              <span>{historySuggest.query || "历史命令"}</span>
+              <span>{historySuggest.query || t("历史命令")}</span>
               <kbd>Enter</kbd>
             </div>
             <div
@@ -901,19 +930,19 @@ function TerminalPaneBase({
                   </button>
                 ))
               ) : (
-                <div className="terminal-history-suggest-empty">没有匹配命令</div>
+                <div className="terminal-history-suggest-empty">{t("没有匹配命令")}</div>
               )}
             </div>
           </div>
         )}
         {(pane || broadcasting) && (
           <div className="pane-label">
-            {broadcasting && <span className="pane-label-broadcast" title="正在广播输入">广播</span>}
+            {broadcasting && <span className="pane-label-broadcast" title={t("正在广播输入")}>{t("广播")}</span>}
             {pane && (
               <>
                 <span className={`tab-dot ${tab.state}`} style={{ color: tab.color }} />
                 <span className="pane-label-title" title={`${tab.title} · ${tab.subtitle}`}>{tab.title}</span>
-                <button type="button" title="关闭窗格" aria-label={`关闭窗格 ${tab.title}`} onClick={onClosePane}>
+                <button type="button" title={t("关闭窗格")} aria-label={t("关闭窗格 {0}", tab.title)} onClick={onClosePane}>
                   <X size={12} />
                 </button>
               </>
@@ -924,8 +953,7 @@ function TerminalPaneBase({
       {tab.state === "closed" && (
         <button type="button" className="terminal-reconnect" onClick={onReconnect}>
           <RefreshCw size={13} />
-          重新连接
-        </button>
+          {t("重新连接")}</button>
       )}
     </section>
   );

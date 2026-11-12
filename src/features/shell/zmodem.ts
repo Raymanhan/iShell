@@ -2,9 +2,11 @@
  * ZMODEM file transfers in the terminal: `sz file` on the server sends a
  * file to this computer, `rz` asks for files to upload. The terminal's raw
  * output goes through a zmodem.js Sentry, which passes ordinary output on
- * and takes over while a transfer runs. Free of app imports for the tests.
+ * and takes over while a transfer runs. It imports nothing from the app but
+ * i18n, so the tests can load it.
  */
 import Zmodem from "zmodem.js";
+import { t } from "../../i18n";
 
 /** A file picked on this computer, read in pieces as it is sent. */
 export interface LocalFile {
@@ -124,7 +126,7 @@ export class ZmodemController {
     } catch {
       // Already ending.
     }
-    this.finish(`[iShell] 传输出错：${String(error)}`);
+    this.finish(`[iShell] ${t("传输出错：{0}", String(error))}`);
   }
 
   /** Stop the running transfer, as Ctrl+C would. */
@@ -136,7 +138,7 @@ export class ZmodemController {
       // Already ending.
     }
     this.sentry = this.createSentry();
-    this.finish("[iShell] 已取消传输");
+    this.finish(`[iShell] ${t("已取消传输")}`);
   }
 
   private send(octets: ArrayLike<number>) {
@@ -180,7 +182,7 @@ export class ZmodemController {
       const chunks: Uint8Array[] = [];
       let received = 0;
       let lastReport = 0;
-      this.host.status(`[iShell] 正在接收 ${name}（${formatBytes(size)}）…`);
+      this.host.status(`[iShell] ${t("正在接收 {0}（{1}）…", name, formatBytes(size))}`);
       offer
         .accept({
           on_input: (payload) => {
@@ -196,8 +198,8 @@ export class ZmodemController {
         })
         .then(() => this.host.saveFile(name, chunks))
         .then(
-          (path) => this.host.status(`[iShell] 已接收 ${name}（${formatBytes(received)}），保存到 ${path}`),
-          (error) => this.host.status(`[iShell] 接收 ${name} 失败：${String(error)}`),
+          (path) => this.host.status(`[iShell] ${t("已接收 {0}（{1}），保存到 {2}", name, formatBytes(received), path)}`),
+          (error) => this.host.status(`[iShell] ${t("接收 {0} 失败：{1}", name, String(error))}`),
         );
     });
     session.start();
@@ -209,10 +211,10 @@ export class ZmodemController {
     try {
       files = await this.host.pickFiles();
     } catch (error) {
-      this.host.status(`[iShell] 无法读取文件：${String(error)}`);
+      this.host.status(`[iShell] ${t("无法读取文件：{0}", String(error))}`);
     }
     if (!files.length) {
-      this.host.status("[iShell] 未选择文件，已取消上传");
+      this.host.status(`[iShell] ${t("未选择文件，已取消上传")}`);
       // Close the session cleanly so `rz` exits rather than waiting.
       try {
         await session.close();
@@ -234,16 +236,16 @@ export class ZmodemController {
         });
         bytesRemaining -= file.size;
         if (!transfer) {
-          this.host.status(`[iShell] 服务器跳过了 ${file.name}`);
+          this.host.status(`[iShell] ${t("服务器跳过了 {0}", file.name)}`);
           continue;
         }
-        this.host.status(`[iShell] 正在发送 ${file.name}（${formatBytes(file.size)}）…`);
+        this.host.status(`[iShell] ${t("正在发送 {0}（{1}）…", file.name, formatBytes(file.size))}`);
         let offset = transfer.get_offset?.() ?? 0;
         let lastReport = Date.now();
         while (offset < file.size) {
           if (!this.session) return;
           const chunk = await file.read(offset, Math.min(SEND_CHUNK, file.size - offset));
-          if (!chunk.length) throw new Error("文件读取不完整");
+          if (!chunk.length) throw new Error(t("文件读取不完整"));
           offset += chunk.length;
           if (offset < file.size) transfer.send(chunk);
           else await transfer.end(chunk);
@@ -254,13 +256,13 @@ export class ZmodemController {
           }
         }
         if (file.size === 0) await transfer.end([]);
-        this.host.status(`[iShell] 已发送 ${file.name}`);
+        this.host.status(`[iShell] ${t("已发送 {0}", file.name)}`);
       }
       await session.close();
       await this.drain();
       this.finish();
     } catch (error) {
-      this.host.status(`[iShell] 发送失败：${String(error)}`);
+      this.host.status(`[iShell] ${t("发送失败：{0}", String(error))}`);
       this.abort();
     }
   }

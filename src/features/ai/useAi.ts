@@ -4,25 +4,39 @@ import { command, isTauri } from "../../api/tauri";
 import { currentDirForTab } from "../sftp/paths";
 import type { ShellTab } from "../shell/types";
 import {
+  readAiPreferences,
+  rememberAiPreferences,
+  sameAiPreferences,
+} from "./preferences";
+import {
   applyAiEvent,
+  applyQueuedText,
+  queueText,
+  TEXT_BATCH_MS,
   defaultAiConfig,
+  historyWriteDelay,
   createConversation,
   restoreConversation,
   resolveTargets,
   historyItems,
   modelSelection,
   mergeModelSources,
+  parseCompactCommand,
+  rewindTo,
   type AiConfig,
   type AiConversation,
   type AiEvent,
   type AiHistorySummary,
   type AiModel,
+  type QueuedText,
 } from "./types";
 
+import { t } from "../../i18n";
 
 export function useAi(tabs: ShellTab[]) {
   const [config, setConfig] = useState<AiConfig>(defaultAiConfig);
   const [configError, setConfigError] = useState("");
+  const [preferencesError, setPreferencesError] = useState("");
   const [models, setModels] = useState<AiModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState("");
@@ -71,13 +85,16 @@ export function useAi(tabs: ShellTab[]) {
     setDeletingIds((ids) => ids.filter((value) => value !== id));
   }
 
+  // Writes one snapshot of the queue. Versions that arrive while it is
+  // writing (a streaming reply updates on every token) wait for the next
+  // debounced flush instead of being rewritten back-to-back.
   function flushHistory(): Promise<void> {
     if (!isTauri || !pendingWrites.current.size) return Promise.resolve();
     if (writing.current) return writing.current;
     writing.current = (async () => {
+      let failed = false;
       try {
-        while (pendingWrites.current.size) {
-          const [id, value] = pendingWrites.current.entries().next().value!;
+        for (const [id, value] of [...pendingWrites.current.entries()]) {
           if (value) await command("ai_save_history", { input: value });
           else {
             await command("ai_delete_history", { id });
@@ -88,22 +105,36 @@ export function useAi(tabs: ShellTab[]) {
         }
         setHistoryError("");
       } catch (error) {
-        setHistoryError(`历史记录保存或删除失败：${error}`);
+        failed = true;
+        setHistoryError(t("历史记录保存或删除失败：{0}", error));
       } finally {
         writing.current = null;
+        // A failure is retried on the next change or by the retry button,
+        // never in a tight loop.
+        if (!failed && pendingWrites.current.size) scheduleFlush();
       }
     })();
     return writing.current;
   }
 
+  function scheduleFlush() {
+    if (writeTimer.current) return;
+    const running = [...pendingWrites.current.values()].some(
+      (value) => value?.requestId,
+    );
+    writeTimer.current = setTimeout(
+      () => {
+        writeTimer.current = null;
+        void flushHistory();
+      },
+      historyWriteDelay(running),
+    );
+  }
+
   function persist(id: string, value: AiConversation | null) {
     if (!isTauri) return;
     pendingWrites.current.set(id, value);
-    if (!writeTimer.current)
-      writeTimer.current = setTimeout(() => {
-        writeTimer.current = null;
-        void flushHistory();
-      }, 500);
+    scheduleFlush();
   }
 
   function update(
@@ -113,6 +144,18 @@ export function useAi(tabs: ShellTab[]) {
     const previous = current.current[id];
     if (!previous || pendingWrites.current.get(id) === null) return;
     const value = { ...change(previous), updatedAt: Date.now() };
+    if (!sameAiPreferences(previous, value)) {
+      try {
+        rememberAiPreferences(
+          window.localStorage,
+          configRef.current.baseUrl,
+          value,
+        );
+        setPreferencesError("");
+      } catch {
+        setPreferencesError(t("AI 选项未能保存到本机，重启后可能需要重新选择。"));
+      }
+    }
     current.current = { ...current.current, [id]: value };
     setConversations(current.current);
     if (value.entries.length) persist(id, value);
@@ -138,6 +181,11 @@ export function useAi(tabs: ShellTab[]) {
             permission: previous.permission,
           }
         : {}),
+      ...readAiPreferences(
+        window.localStorage,
+        configRef.current.baseUrl,
+        tab.serverId,
+      ),
     };
     current.current = { ...current.current, [value.id]: value };
     setConversations(current.current);
@@ -155,7 +203,7 @@ export function useAi(tabs: ShellTab[]) {
       setHistoryError("");
     } catch (error) {
       if (generation === historyGeneration.current)
-        setHistoryError(`历史记录读取失败：${error}`);
+        setHistoryError(t("历史记录读取失败：{0}", error));
     }
   }
 
@@ -177,7 +225,7 @@ export function useAi(tabs: ShellTab[]) {
         return restored;
       })
       .catch((error) => {
-        setHistoryError(`历史记录读取失败：${error}`);
+        setHistoryError(t("历史记录读取失败：{0}", error));
         return null;
       })
       .finally(() => opening.current.delete(id));
@@ -309,14 +357,23 @@ export function useAi(tabs: ShellTab[]) {
           {
             id: crypto.randomUUID(),
             kind: "error",
-            text: `停止请求失败：${error}`,
+            text: t("停止请求失败：{0}", error),
           },
         ],
       }));
     }
   }
 
-  async function send(tab: ShellTab) {
+  /**
+   * Sends the composer draft. With `edit`, replaces the user message
+   * `edit.entryId` with `edit.text` instead: everything after it, in the chat
+   * and in the model context, is dropped and the task runs again from there.
+   * Returns whether the message was sent.
+   */
+  async function send(
+    tab: ShellTab,
+    edit?: { entryId: string; text: string },
+  ): Promise<boolean> {
     const id = active.current[tab.id];
     const conversation = current.current[id];
     if (
@@ -324,7 +381,7 @@ export function useAi(tabs: ShellTab[]) {
       !historyLoaded ||
       pendingWrites.current.get(id) === null
     )
-      return;
+      return false;
     const selection = modelSelection(
       availableModels,
       conversation.model,
@@ -333,9 +390,16 @@ export function useAi(tabs: ShellTab[]) {
       conversation.manualModel,
       conversation.manualEffort,
     );
-    const text = conversation.draft.trim();
+    const text = (edit ? edit.text : conversation.draft).trim();
+    const compactFocus = edit ? null : parseCompactCommand(text);
+    if (compactFocus !== null) {
+      await compactConversation(tab, id, selection.model, text, compactFocus);
+      return true;
+    }
+    const rewound = edit ? rewindTo(conversation, edit.entryId) : null;
     if (
       !text ||
+      (edit && (!rewound || parseCompactCommand(text) !== null)) ||
       Object.values(current.current).some(
         (value) => value.serverId === tab.serverId && value.requestId,
       ) ||
@@ -343,7 +407,7 @@ export function useAi(tabs: ShellTab[]) {
       !selection.model ||
       (modelsLoading && !selection.manualModel)
     )
-      return;
+      return false;
     if (!isTauri) {
       update(id, (value) => ({
         ...value,
@@ -352,11 +416,11 @@ export function useAi(tabs: ShellTab[]) {
           {
             id: crypto.randomUUID(),
             kind: "notice",
-            text: "请在桌面客户端连接服务器后使用 AI，浏览器预览不会执行命令。",
+            text: t("请在桌面客户端连接服务器后使用 AI，浏览器预览不会执行命令。"),
           },
         ],
       }));
-      return;
+      return false;
     }
     const { sessions: targets, missing } = resolveTargets(
       conversation.targets,
@@ -365,12 +429,13 @@ export function useAi(tabs: ShellTab[]) {
     );
     const requestId = crypto.randomUUID();
     const messages = [
-      ...conversation.messages,
+      ...(rewound ? rewound.messages : conversation.messages),
       { role: "user", content: text },
     ];
     update(id, (value) => ({
       ...value,
-      draft: "",
+      // An edit leaves whatever is being typed in the composer alone.
+      draft: edit ? value.draft : "",
       model: selection.model,
       effort: selection.effort,
       manualModel: selection.manualModel,
@@ -380,14 +445,14 @@ export function useAi(tabs: ShellTab[]) {
       stopping: false,
       sessionId: tab.sessionId,
       entries: [
-        ...value.entries,
+        ...(rewound ? rewound.entries : value.entries),
         { id: crypto.randomUUID(), kind: "user", text },
         ...(missing.length
           ? [
               {
                 id: crypto.randomUUID(),
                 kind: "notice" as const,
-                text: `${missing.length} 台已选服务器没有已连接的终端，本次不包含它们。`,
+                text: t("{0} 台已选服务器没有已连接的终端，本次不包含它们。", missing.length),
               },
             ]
           : []),
@@ -396,9 +461,31 @@ export function useAi(tabs: ShellTab[]) {
     void flushHistory();
     let assistantId = crypto.randomUUID();
     let compactionId = crypto.randomUUID();
+    // Tokens can arrive faster than the panel can usefully redraw, and each
+    // update re-renders the app. Text is batched; any other event, and the
+    // end of the request, applies what is waiting first so order is kept.
+    let queued: QueuedText[] = [];
+    let textTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushText = () => {
+      if (textTimer) clearTimeout(textTimer);
+      textTimer = null;
+      if (!queued.length) return;
+      const batch = queued;
+      queued = [];
+      update(id, (value) => ({
+        ...value,
+        entries: applyQueuedText(value.entries, batch),
+      }));
+    };
     const onEvent = new Channel<AiEvent>();
     onEvent.onmessage = (event) => {
       if (current.current[id]?.requestId !== requestId) return;
+      if (event.type === "text" || event.type === "thinking") {
+        queued = queueText(queued, event, assistantId);
+        if (!textTimer) textTimer = setTimeout(flushText, TEXT_BATCH_MS);
+        return;
+      }
+      flushText();
       if (event.type === "compaction_start") {
         compactionId = crypto.randomUUID();
         update(id, (value) => ({
@@ -410,7 +497,7 @@ export function useAi(tabs: ShellTab[]) {
             {
               id: compactionId,
               kind: "notice",
-              text: "上下文正在自动压缩，保留任务目标、关键结果与近期消息…",
+              text: t("上下文正在自动压缩，保留任务目标、关键结果与近期消息…"),
             },
           ],
         }));
@@ -423,7 +510,7 @@ export function useAi(tabs: ShellTab[]) {
             entry.id === compactionId
               ? {
                   ...entry,
-                  text: `已自动压缩上下文：约 ${Math.round((event.beforeTokens || 0) / 1000)}k → ${Math.round((event.afterTokens || 0) / 1000)}k tokens。聊天记录仍可查看。`,
+                  text: t("已自动压缩上下文：约 {0}k → {1}k tokens。聊天记录仍可查看。", Math.round((event.beforeTokens || 0) / 1000), Math.round((event.afterTokens || 0) / 1000)),
                 }
               : entry,
           ),
@@ -452,6 +539,7 @@ export function useAi(tabs: ShellTab[]) {
         },
         onEvent,
       });
+      flushText();
       update(id, (value) => ({
         ...value,
         messages: result.messages,
@@ -463,10 +551,147 @@ export function useAi(tabs: ShellTab[]) {
                 {
                   id: crypto.randomUUID(),
                   kind: "notice" as const,
-                  text: "已停止。已完成的操作会保留，可继续对话。",
+                  text: t("已停止。已完成的操作会保留，可继续对话。"),
                 },
               ]
             : []),
+          ...(result.error
+            ? [
+                {
+                  id: crypto.randomUUID(),
+                  kind: "error" as const,
+                  text: result.error,
+                },
+              ]
+            : []),
+        ],
+      }));
+    } catch (error) {
+      flushText();
+      update(id, (value) => ({
+        ...value,
+        entries: [
+          ...value.entries,
+          { id: crypto.randomUUID(), kind: "error", text: String(error) },
+        ],
+      }));
+    } finally {
+      flushText();
+      automaticStops.current.delete(requestId);
+      update(id, (value) => ({
+        ...value,
+        requestId: null,
+        stopping: false,
+        compacting: false,
+        entries: value.entries.map((entry) => ({
+          ...entry,
+          ...(value.compacting && entry.id === compactionId
+            ? { text: t("本次压缩未完成，原上下文已保留。") }
+            : {}),
+          running: false,
+          approvalPending: false,
+        })),
+      }));
+      void flushHistory();
+    }
+    return true;
+  }
+
+  /** `/compact`: summarize this conversation now, between tasks. */
+  async function compactConversation(
+    tab: ShellTab,
+    id: string,
+    model: string,
+    text: string,
+    focus: string,
+  ) {
+    const conversation = current.current[id];
+    if (
+      !conversation ||
+      Object.values(current.current).some(
+        (value) => value.serverId === tab.serverId && value.requestId,
+      )
+    )
+      return;
+    const notice = (message: string) =>
+      update(id, (value) => ({
+        ...value,
+        draft: "",
+        entries: [
+          ...value.entries,
+          { id: crypto.randomUUID(), kind: "user", text },
+          { id: crypto.randomUUID(), kind: "notice", text: message },
+        ],
+      }));
+    if (!conversation.messages.length) {
+      notice(t("暂无可压缩的上下文。"));
+      return;
+    }
+    if (!isTauri) {
+      notice(t("请在桌面客户端使用 /compact，浏览器预览不会调用模型。"));
+      return;
+    }
+    if (!model || (modelsLoading && !conversation.manualModel)) return;
+    const requestId = crypto.randomUUID();
+    const noticeId = crypto.randomUUID();
+    let finished = false;
+    update(id, (value) => ({
+      ...value,
+      draft: "",
+      requestId,
+      stopping: false,
+      compacting: true,
+      sessionId: tab.sessionId,
+      entries: [
+        ...value.entries,
+        { id: crypto.randomUUID(), kind: "user", text },
+        {
+          id: noticeId,
+          kind: "notice",
+          text: focus
+            ? t("正在压缩上下文，重点保留：{0}…", focus)
+            : t("正在压缩上下文…"),
+        },
+      ],
+    }));
+    const setNotice = (message: string) =>
+      update(id, (value) => ({
+        ...value,
+        entries: value.entries.map((entry) =>
+          entry.id === noticeId ? { ...entry, text: message } : entry,
+        ),
+      }));
+    const onEvent = new Channel<AiEvent>();
+    onEvent.onmessage = (event) => {
+      if (current.current[id]?.requestId !== requestId) return;
+      if (event.type === "compaction_end") {
+        finished = true;
+        setNotice(
+          t(
+            "已压缩上下文：约 {0}k → {1}k tokens。聊天记录仍可查看。",
+            Math.round((event.beforeTokens || 0) / 1000),
+            Math.round((event.afterTokens || 0) / 1000),
+          ),
+        );
+      }
+    };
+    try {
+      const result = await command("ai_compact", {
+        input: {
+          requestId,
+          serverId: tab.serverId,
+          model,
+          focus,
+          messages: conversation.messages,
+        },
+        onEvent,
+      });
+      update(id, (value) => ({
+        ...value,
+        messages: result.messages,
+        contextTokens: result.contextTokens ?? value.contextTokens,
+        entries: [
+          ...value.entries,
           ...(result.error
             ? [
                 {
@@ -487,20 +712,13 @@ export function useAi(tabs: ShellTab[]) {
         ],
       }));
     } finally {
+      if (!finished) setNotice(t("本次压缩未完成，原上下文已保留。"));
       automaticStops.current.delete(requestId);
       update(id, (value) => ({
         ...value,
         requestId: null,
         stopping: false,
         compacting: false,
-        entries: value.entries.map((entry) => ({
-          ...entry,
-          ...(value.compacting && entry.id === compactionId
-            ? { text: "本次压缩未完成，原上下文已保留。" }
-            : {}),
-          running: false,
-          approvalPending: false,
-        })),
       }));
       void flushHistory();
     }
@@ -555,6 +773,7 @@ export function useAi(tabs: ShellTab[]) {
   return {
     config,
     configError,
+    preferencesError,
     models: availableModels,
     modelsLoading,
     modelsError,
@@ -585,11 +804,11 @@ export function useAi(tabs: ShellTab[]) {
     newChat,
     /** One shell command for a description, using the tab's current model. */
     suggestCommand: async (tab: ShellTab, request: string): Promise<string> => {
-      if (!isTauri) return `echo "演示模式：${request.replace(/["\\$`]/g, "")}"`;
-      if (!tab.sessionId) throw new Error("终端尚未连接");
+      if (!isTauri) return `echo "${t("演示模式：{0}", request.replace(/["\\$`]/g, ""))}"`;
+      if (!tab.sessionId) throw new Error(t("终端尚未连接"));
       const conversation = current.current[active.current[tab.id]];
       const model = conversation?.model || configRef.current.defaultModel;
-      if (!model) throw new Error("请先在 AI 助手设置中选择模型");
+      if (!model) throw new Error(t("请先在 AI 助手设置中选择模型"));
       return command("ai_suggest_command", {
         input: {
           serverId: tab.serverId,
@@ -600,11 +819,28 @@ export function useAi(tabs: ShellTab[]) {
         },
       });
     },
+    restorePreferences: (tabId: string) => {
+      const id = active.current[tabId];
+      const value = current.current[id];
+      if (!value || value.entries.length || value.draft || value.requestId)
+        return;
+      const next = {
+        ...value,
+        ...readAiPreferences(
+          window.localStorage,
+          configRef.current.baseUrl,
+          value.serverId,
+        ),
+      };
+      if (!sameAiPreferences(value, next)) update(id, () => next);
+    },
     update: (
       tabId: string,
       change: (value: AiConversation) => AiConversation,
     ) => update(active.current[tabId], change),
-    send,
+    send: (tab: ShellTab) => send(tab),
+    editAndResend: (tab: ShellTab, entryId: string, text: string) =>
+      send(tab, { entryId, text }),
     stop: (tabId: string) => stop(active.current[tabId]),
     approve: (tabId: string, entryId: string, allow: boolean) =>
       approve(active.current[tabId], entryId, allow),

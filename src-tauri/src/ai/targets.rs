@@ -148,6 +148,7 @@ pub fn run(
     name: &str,
     args: &Value,
     hosts: &[&Host],
+    guard_sensitive: bool,
 ) -> Result<Value, String> {
     let context = |host: &Host, events: Channel<Event>| tools::Context {
         app: app.clone(),
@@ -156,6 +157,7 @@ pub fn run(
         terminals: terminals.clone(),
         cancel: cancel.clone(),
         events,
+        guard_sensitive,
     };
     if let [host] = hosts {
         return tools::execute(

@@ -5,6 +5,7 @@
   --rail-gap: 12px;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   width: 100vw;
   height: 100vh;
   overflow: hidden;
@@ -747,7 +748,9 @@
 }
 .workbench-main {
   position: relative;
-  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
   min-width: 0;
   min-height: 0;
   padding: 0;
@@ -785,7 +788,14 @@
   left: -5px;
   width: 10px;
 }
+/* Closed, the divider sits on the window's right edge; its hit area would
+   overflow the clipped workbench by 5px (see .dock-divider). */
+.status-divider:not(.open)::before {
+  content: none;
+}
 .status-panel {
+  display: flex;
+  flex-direction: column;
   flex: 0 0 auto;
   width: 0;
   min-width: 0;
@@ -821,9 +831,12 @@
     0 0 0 1px rgba(255, 255, 255, 0.07);
 }
 .status-panel-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
   width: 100%;
-  height: 100%;
   min-height: 0;
+  overflow: hidden;
   padding-top: 6px;
   animation: side-panel-content-in 170ms cubic-bezier(0.2, 0.85, 0.25, 1);
 }
@@ -921,7 +934,7 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  height: 100%;
+  flex: 1 1 0;
   min-height: 0;
   overflow: hidden;
   background: var(--inset);
@@ -934,7 +947,7 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   overflow: hidden;
   background: var(--inset);
@@ -972,18 +985,46 @@
   height: var(--titlebar-safe, 34px);
   min-width: 0;
   padding: var(--topbar-tab-top) 0 0;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
   background: transparent;
   opacity: 1;
   pointer-events: auto;
   transition: opacity 140ms ease;
+  --tabs-fade-left: 0px;
+  --tabs-fade-right: 0px;
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    transparent 0,
+    #000 var(--tabs-fade-left),
+    #000 calc(100% - var(--tabs-fade-right)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    transparent 0,
+    #000 var(--tabs-fade-left),
+    #000 calc(100% - var(--tabs-fade-right)),
+    transparent 100%
+  );
+}
+.terminal-tabs::-webkit-scrollbar {
+  display: none;
+}
+.terminal-tabs.fade-left {
+  --tabs-fade-left: 22px;
+}
+.terminal-tabs.fade-right {
+  --tabs-fade-right: 22px;
 }
 .workbench-bar.auto-hide .terminal-tabs {
   opacity: 0;
   pointer-events: none;
 }
 .terminal-tabs-spacer {
-  flex: 1 1 auto;
+  flex: 1 0 auto;
   align-self: stretch;
   min-width: 18px;
   height: var(--titlebar-safe, 34px);
@@ -1006,7 +1047,7 @@
   align-items: center;
   flex: 1 1 var(--tab-width, 150px);
   max-width: var(--tab-width, 150px);
-  min-width: 76px;
+  min-width: 104px;
   height: 25px;
   min-height: 25px;
   border: 0;
@@ -1157,7 +1198,7 @@
 }
 .terminal-stack {
   position: relative;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   overflow: hidden;
 }
@@ -1246,6 +1287,13 @@
   right: 0;
   left: 0;
   height: 10px;
+}
+/* With the file panel closed the divider sits on the dock's bottom edge, and
+   its hit area would hang 5px below it. That made the overflow-hidden dock
+   scrollable by 5px; macOS WebKit scrolls it when the terminal takes focus,
+   shifting the terminal card above the neighbouring cards. */
+.dock-divider:not(.open)::before {
+  content: none;
 }
 .dock-divider::after {
   content: none;

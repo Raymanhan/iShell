@@ -1,6 +1,7 @@
 import type { Terminal } from "@xterm/xterm";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { t } from "../../i18n";
 
 /**
  * Measure characters by Unicode 11, which gives CJK, emoji and other wide
@@ -27,12 +28,12 @@ export function enableWebglRenderer(terminal: Terminal, onFallback?: (reason: st
     addon = new WebglAddon();
     addon.onContextLoss(() => {
       release();
-      onFallback?.("GPU 渲染上下文丢失，已切换为普通渲染");
+      onFallback?.(t("GPU 渲染上下文丢失，已切换为普通渲染"));
     });
     terminal.loadAddon(addon);
   } catch (error) {
     release();
-    onFallback?.(`GPU 渲染不可用：${error}`);
+    onFallback?.(t("GPU 渲染不可用：{0}", String(error)));
   }
   return release;
 }
