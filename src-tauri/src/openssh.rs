@@ -60,6 +60,15 @@ const MAX_SOCKET_PATH: usize = 100;
 /// `<slug>-<fingerprint>.sock`: a 10-character slug and 12 hex digits.
 #[cfg(not(russh_backend))]
 const SOCKET_NAME_LEN: usize = 10 + 1 + 12 + ".sock".len();
+/// A master `ssh` first listens on `<ControlPath>.<16 random characters>` and
+/// renames it into place, so that longer path must fit too.
+#[cfg(not(russh_backend))]
+const SSH_TEMP_SUFFIX_LEN: usize = 1 + 16;
+/// The longest socket path `ssh` creates for a socket in `dir`.
+#[cfg(not(russh_backend))]
+fn longest_socket_path(dir: &Path) -> usize {
+    dir.as_os_str().len() + 1 + SOCKET_NAME_LEN + SSH_TEMP_SUFFIX_LEN
+}
 
 /// Make `dir` a directory only this user can enter, or report that it is not
 /// one: a symlink, someone else's directory, or one others can write to.
@@ -67,7 +76,7 @@ const SOCKET_NAME_LEN: usize = 10 + 1 + 12 + ".sock".len();
 fn private_dir(dir: &Path) -> bool {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
-    if dir.as_os_str().len() + 1 + SOCKET_NAME_LEN > MAX_SOCKET_PATH {
+    if longest_socket_path(dir) > MAX_SOCKET_PATH {
         return false;
     }
     let _ = fs::DirBuilder::new().mode(0o700).create(dir);
@@ -480,7 +489,7 @@ mod tests {
             "{name}"
         );
         assert_eq!(name.len(), SOCKET_NAME_LEN);
-        assert!(path.as_os_str().len() <= MAX_SOCKET_PATH);
+        assert!(path.as_os_str().len() + SSH_TEMP_SUFFIX_LEN <= MAX_SOCKET_PATH);
         assert_eq!(
             control_path(&target),
             Some(path.clone()),
@@ -528,6 +537,19 @@ mod tests {
         std::os::unix::fs::symlink(&open, &link).unwrap();
         assert!(!private_dir(&link));
         fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_long_temporary_directory_is_not_used_for_sockets() {
+        // macOS's per-user temporary directory. A socket under it fits, but
+        // the temporary name `ssh` listens on first does not ("unix_listener:
+        // path ... too long for Unix domain socket").
+        let macos = Path::new("/var/folders/xy/abcdefghijklmnopqrstuvwx0000gn/T/ishell-501");
+        assert!(macos.as_os_str().len() + 1 + SOCKET_NAME_LEN <= MAX_SOCKET_PATH);
+        assert!(longest_socket_path(macos) > MAX_SOCKET_PATH);
+        assert!(!private_dir(macos));
+        // The fallback under /tmp has room to spare.
+        assert!(longest_socket_path(Path::new("/tmp/ishell-501")) <= MAX_SOCKET_PATH);
     }
 
     #[test]
