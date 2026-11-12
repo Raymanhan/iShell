@@ -2,7 +2,8 @@ mod ai;
 mod commands;
 mod encoding;
 mod error;
-#[cfg(test)]
+// Needs real SSH servers, a display (xvfb) and XDG paths: Linux only, like CI.
+#[cfg(all(test, target_os = "linux"))]
 mod live_tests;
 mod local_shell;
 mod models;
