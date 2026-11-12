@@ -46,6 +46,29 @@ class RemoteTools(unittest.TestCase):
             self.job('clean', job_id)
         self.directory.cleanup()
 
+    def test_parallel_starts_share_a_fresh_temp_directory(self):
+        # Several servers in one AI task can be the same account on the same
+        # machine; their jobs start at once and all create the base directory.
+        fresh = self.root / 'fresh-tmp'
+        fresh.mkdir()
+        env = dict(os.environ, TMPDIR=str(fresh))
+        go = self.root / 'go'
+        # Each job waits for one signal, so they all reach the script together.
+        wait = 'import os, time\nwhile not os.path.exists(' + repr(str(go)) + '): time.sleep(0.0005)\n'
+        processes = []
+        for _ in range(16):
+            payload = json.dumps(dict(action='start', job=str(uuid.uuid4()),
+                                      input=dict(name='shell', args=dict(command='true')), runner=RUNNER))
+            script = wait + 'import json\npayload=json.loads(' + repr(payload) + ')\n' + JOB
+            processes.append(subprocess.Popen([sys.executable, '-c', script], env=env,
+                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        time.sleep(0.5)
+        go.touch()
+        for process in processes:
+            out, err = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, err)
+            self.assertEqual(json.loads(out)['status'], 'running')
+
     def test_stdout_stderr_exit_code_and_unicode(self):
         result = self.wait(self.start('shell', dict(command="printf '中文 output'; printf 'problem' >&2; exit 7", cwd=str(self.root))))
         self.assertEqual(result['stdout'], '中文 output')

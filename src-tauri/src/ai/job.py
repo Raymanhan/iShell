@@ -7,11 +7,13 @@ import json, os, shutil, subprocess, sys, tempfile, time
 STALE_SECONDS = 3600
 
 base = os.path.join(tempfile.gettempdir(), 'ishell-ai-' + str(os.getuid()))
-if os.path.lexists(base):
-    if os.path.islink(base) or os.stat(base).st_uid != os.getuid():
-        raise ValueError('AI 临时目录所有者无效')
-else:
+try:
     os.mkdir(base, 0o700)
+except FileExistsError:
+    # Made earlier, or just now by a parallel job for the same account.
+    pass
+if os.path.islink(base) or os.stat(base).st_uid != os.getuid():
+    raise ValueError('AI 临时目录所有者无效')
 os.chmod(base, 0o700)
 root = os.path.join(base, payload['job'])
 action = payload['action']
