@@ -511,7 +511,10 @@ mod tests {
         assert_eq!(dir.permissions().mode() & 0o077, 0);
 
         // A directory open to others is locked down before use; a symlink is refused.
-        let base = std::env::temp_dir().join(format!("ishell-ctl-{}", uuid::Uuid::new_v4()));
+        // Under /tmp with a short name: the socket path limit applies, and
+        // macOS's per-user temporary directory is already about 50 bytes long.
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let base = PathBuf::from(format!("/tmp/ictl-{}", &id[..8]));
         fs::create_dir_all(&base).unwrap();
         let open = base.join("open");
         fs::create_dir(&open).unwrap();
