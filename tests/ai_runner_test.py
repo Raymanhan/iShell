@@ -20,10 +20,10 @@ class RemoteTools(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.jobs = []
 
-    def job(self, action, job_id, **extra):
+    def job(self, action, job_id, env=None, **extra):
         payload = json.dumps(dict(action=action, job=job_id, **extra))
         script = 'import json\npayload=json.loads(' + repr(payload) + ')\n' + JOB
-        return json.loads(subprocess.check_output([sys.executable, '-c', script], text=True))
+        return json.loads(subprocess.check_output([sys.executable, '-c', script], text=True, env=env))
 
     def start(self, name, args, runner=RUNNER):
         job_id = str(uuid.uuid4())
@@ -31,10 +31,10 @@ class RemoteTools(unittest.TestCase):
         self.job('start', job_id, input=dict(name=name, args=args), runner=runner)
         return job_id
 
-    def wait(self, job_id, timeout=8):
+    def wait(self, job_id, timeout=8, env=None):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            result = self.job('poll', job_id)
+            result = self.job('poll', job_id, env=env)
             if result['status'] == 'done': return result
             time.sleep(.08)
         self.fail('runner did not exit')
@@ -55,9 +55,11 @@ class RemoteTools(unittest.TestCase):
         go = self.root / 'go'
         # Each job waits for one signal, so they all reach the script together.
         wait = 'import os, time\nwhile not os.path.exists(' + repr(str(go)) + '): time.sleep(0.0005)\n'
-        processes = []
+        jobs, processes = [], []
         for _ in range(16):
-            payload = json.dumps(dict(action='start', job=str(uuid.uuid4()),
+            job_id = str(uuid.uuid4())
+            jobs.append(job_id)
+            payload = json.dumps(dict(action='start', job=job_id,
                                       input=dict(name='shell', args=dict(command='true')), runner=RUNNER))
             script = wait + 'import json\npayload=json.loads(' + repr(payload) + ')\n' + JOB
             processes.append(subprocess.Popen([sys.executable, '-c', script], env=env,
@@ -68,6 +70,10 @@ class RemoteTools(unittest.TestCase):
             out, err = process.communicate(timeout=10)
             self.assertEqual(process.returncode, 0, err)
             self.assertEqual(json.loads(out)['status'], 'running')
+        # Let every runner finish before the directory is removed.
+        for job_id in jobs:
+            self.assertEqual(self.wait(job_id, env=env)['exitCode'], 0)
+            self.job('clean', job_id, env=env)
 
     def test_stdout_stderr_exit_code_and_unicode(self):
         result = self.wait(self.start('shell', dict(command="printf '中文 output'; printf 'problem' >&2; exit 7", cwd=str(self.root))))
