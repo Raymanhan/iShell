@@ -62,7 +62,7 @@ CI also runs end-to-end tests of both SSH backends, and rz/sz over a real SSH se
 sudo scripts/live-ssh-servers.sh /tmp/ishell-live > live.env
 set -a; . ./live.env; set +a
 (cd src-tauri && xvfb-run -a cargo test live_ -- --nocapture)
-node --test tests/zmodemSsh.test.mjs
+node --import ./tests/register-ts.mjs --test tests/zmodemSsh.test.mjs
 ```
 
 Changes to transfers, authentication, forwarding, or window handoff also need end-to-end checks with a desktop build and suitable test servers.

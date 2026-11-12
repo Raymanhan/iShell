@@ -112,4 +112,4 @@ jobs:
       - name: ZMODEM over SSH
         run: |
           npm ci
-          node --test tests/zmodemSsh.test.mjs
+          node --import ./tests/register-ts.mjs --test tests/zmodemSsh.test.mjs
