@@ -10,11 +10,19 @@ import {
 } from "../../constants/theme";
 import { applyNativeWindowTheme } from "../theme/nativeWindowTheme";
 import { AUTO_CHECK_UPDATES_KEY, readAutoCheckUpdates } from "../updater/useUpdater";
+import {
+  normalizeFontSetting,
+  readTerminalFontWeight,
+  readTerminalTextRendering,
+} from "./terminalFonts";
 
 const THEME_KEY = "ishell.theme";
 const TERMINAL_FONT_SIZE_KEY = "ishell.terminalFontSize";
 const AUTO_HIDE_TOP_BAR_KEY = "ishell.autoHideTopBar";
 const GPU_RENDERING_KEY = "ishell.terminalGpuRendering";
+const TERMINAL_FONT_FAMILY_KEY = "ishell.terminalFontFamily";
+const TERMINAL_FONT_WEIGHT_KEY = "ishell.terminalFontWeight";
+const TERMINAL_TEXT_RENDERING_KEY = "ishell.terminalTextRendering";
 
 export const MIN_TERMINAL_FONT_SIZE = 11;
 export const MAX_TERMINAL_FONT_SIZE = 20;
@@ -56,6 +64,16 @@ export function useAppSettings() {
   const [terminalFontSize, setTerminalFontSize] = useState(() =>
     readTerminalFontSize(load(TERMINAL_FONT_SIZE_KEY)),
   );
+  const [terminalFontFamily, setTerminalFontFamilyState] = useState(() =>
+    normalizeFontSetting(load(TERMINAL_FONT_FAMILY_KEY)),
+  );
+  const setTerminalFontFamily = (value: string) => setTerminalFontFamilyState(normalizeFontSetting(value));
+  const [terminalFontWeight, setTerminalFontWeight] = useState(() =>
+    readTerminalFontWeight(load(TERMINAL_FONT_WEIGHT_KEY)),
+  );
+  const [terminalTextRendering, setTerminalTextRendering] = useState(() =>
+    readTerminalTextRendering(load(TERMINAL_TEXT_RENDERING_KEY)),
+  );
   const [tailViewerDefaultLines, setTailViewerDefaultLines] = useState(() =>
     readSavedTailViewerLines(load(TAIL_VIEWER_DEFAULT_LINES_KEY)),
   );
@@ -77,6 +95,9 @@ export function useAppSettings() {
   }, [theme, windowTransparency]);
 
   useEffect(() => store(TERMINAL_FONT_SIZE_KEY, String(terminalFontSize)), [terminalFontSize]);
+  useEffect(() => store(TERMINAL_FONT_FAMILY_KEY, terminalFontFamily), [terminalFontFamily]);
+  useEffect(() => store(TERMINAL_FONT_WEIGHT_KEY, terminalFontWeight), [terminalFontWeight]);
+  useEffect(() => store(TERMINAL_TEXT_RENDERING_KEY, terminalTextRendering), [terminalTextRendering]);
   useEffect(
     () => store(TAIL_VIEWER_DEFAULT_LINES_KEY, String(tailViewerDefaultLines)),
     [tailViewerDefaultLines],
@@ -92,6 +113,12 @@ export function useAppSettings() {
     setWindowTransparency,
     terminalFontSize,
     setTerminalFontSize,
+    terminalFontFamily,
+    setTerminalFontFamily,
+    terminalFontWeight,
+    setTerminalFontWeight,
+    terminalTextRendering,
+    setTerminalTextRendering,
     tailViewerDefaultLines,
     setTailViewerDefaultLines,
     autoCheckUpdates,
