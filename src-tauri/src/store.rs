@@ -1,81 +1,170 @@
-use std::{fs, path::PathBuf};
-
-use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes256Gcm, Key, Nonce,
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{Mutex, MutexGuard, OnceLock, PoisonError},
 };
-use rusqlite::{params, Connection, OptionalExtension};
-use tauri::{AppHandle, Manager};
 
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use tauri::AppHandle;
+
+pub use crate::secrets::{decrypt_secret, encrypt_secret};
 use crate::{
     models::{
         JumpHop, PortForward, PortForwardInput, ServerInput, ServerRecord, Snippet, SnippetInput,
     },
+    secrets::app_data_dir,
     time::now,
 };
 
 const DB_FILE: &str = "ishell.db";
-const KEY_FILE: &str = "secret.key";
 const LEGACY_JSON: &str = "servers.json";
 const COMMAND_HISTORY_LIMIT: i64 = 10_000;
 /// Jump hosts allowed in front of a server (counting the server's own jump).
 pub const MAX_JUMP_HOPS: usize = 3;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS servers (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    host TEXT NOT NULL,
-    port INTEGER NOT NULL,
-    username TEXT NOT NULL,
-    \"group\" TEXT NOT NULL,
-    tags TEXT NOT NULL,
-    auth_type TEXT NOT NULL,
-    key_path TEXT,
-    color TEXT NOT NULL,
-    notes TEXT NOT NULL,
-    secret BLOB,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    last_connected_at INTEGER,
-    sort_order INTEGER NOT NULL DEFAULT 0,
-    jump_server_id TEXT
-);";
+/// Schema migrations, applied in order inside one transaction each. The
+/// database's `user_version` is the number of migrations it has had. Never
+/// edit a released migration: add a new one.
+const MIGRATIONS: &[fn(&Transaction) -> rusqlite::Result<()>] = &[
+    migration_baseline,
+    migration_history_scopes,
+    migration_terminal_encoding,
+];
 
-const COMMAND_HISTORY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS command_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    command TEXT NOT NULL,
-    created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_command_history_created_at ON command_history(created_at DESC);";
+/// Everything created before migrations were versioned. Databases from those
+/// versions already have some or all of it, hence `IF NOT EXISTS` and the
+/// column checks.
+fn migration_baseline(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS servers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            host TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            \"group\" TEXT NOT NULL,
+            tags TEXT NOT NULL,
+            auth_type TEXT NOT NULL,
+            key_path TEXT,
+            color TEXT NOT NULL,
+            notes TEXT NOT NULL,
+            secret BLOB,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            last_connected_at INTEGER,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            jump_server_id TEXT
+        );
+        CREATE TABLE IF NOT EXISTS command_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            command TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_command_history_created_at
+            ON command_history(created_at DESC);
+        CREATE TABLE IF NOT EXISTS snippets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            command TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            run INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS port_forwards (
+            id TEXT PRIMARY KEY,
+            server_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            bind_host TEXT NOT NULL,
+            bind_port INTEGER NOT NULL,
+            dest_host TEXT NOT NULL DEFAULT '',
+            dest_port INTEGER NOT NULL DEFAULT 0,
+            description TEXT NOT NULL DEFAULT '',
+            auto_start INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ai_settings (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            encrypted BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ai_history (
+            id TEXT PRIMARY KEY,
+            encrypted BLOB NOT NULL
+        );",
+    )?;
+    add_column(tx, "servers", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column(tx, "servers", "jump_server_id", "TEXT")
+}
 
-const SNIPPETS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS snippets (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    command TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    run INTEGER NOT NULL DEFAULT 0,
-    sort_order INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-);";
+/// Command history per server, and AI conversations listed without
+/// decrypting their bodies.
+fn migration_history_scopes(tx: &Transaction) -> rusqlite::Result<()> {
+    // NULL server_id: typed before history was kept per server.
+    add_column(tx, "command_history", "server_id", "TEXT")?;
+    // NULL server_id: saved before these columns existed; filled in the first
+    // time the history is listed, which is when the master key is at hand.
+    add_column(tx, "ai_history", "server_id", "TEXT")?;
+    add_column(tx, "ai_history", "summary", "BLOB")?;
+    add_column(tx, "ai_history", "created_at", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column(tx, "ai_history", "updated_at", "INTEGER NOT NULL DEFAULT 0")?;
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_command_history_server
+            ON command_history(server_id, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_history_server
+            ON ai_history(server_id, updated_at DESC);",
+    )
+}
 
-const PORT_FORWARDS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS port_forwards (
-    id TEXT PRIMARY KEY,
-    server_id TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    bind_host TEXT NOT NULL,
-    bind_port INTEGER NOT NULL,
-    dest_host TEXT NOT NULL DEFAULT '',
-    dest_port INTEGER NOT NULL DEFAULT 0,
-    description TEXT NOT NULL DEFAULT '',
-    auto_start INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-);";
+/// Each server's terminal character encoding.
+fn migration_terminal_encoding(tx: &Transaction) -> rusqlite::Result<()> {
+    add_column(tx, "servers", "encoding", "TEXT NOT NULL DEFAULT 'UTF-8'")
+}
+
+/// Add a column unless the table already has it.
+fn add_column(
+    tx: &Transaction,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> rusqlite::Result<()> {
+    let exists = tx
+        .prepare(&format!("PRAGMA table_info(\"{table}\")"))?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == column);
+    if !exists {
+        tx.execute(
+            &format!("ALTER TABLE \"{table}\" ADD COLUMN \"{column}\" {definition}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Connection settings and pending migrations for a freshly opened database.
+fn prepare(conn: &mut Connection) -> rusqlite::Result<()> {
+    // WAL keeps readers and the writer from blocking each other and survives a
+    // crash mid-write; it is a no-op for in-memory databases.
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    // A newer iShell may have migrated further; its additions are left alone.
+    for (index, migration) in MIGRATIONS.iter().enumerate().skip(version.max(0) as usize) {
+        let tx = conn.transaction()?;
+        migration(&tx)?;
+        tx.pragma_update(None, "user_version", index as i64 + 1)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
 
 const FORWARD_COLUMNS: &str = "id, server_id, kind, bind_host, bind_port, dest_host, dest_port, description, auto_start, created_at, updated_at";
 
-const COLUMNS: &str = "id,name,host,port,username,\"group\",tags,auth_type,key_path,color,notes,created_at,updated_at,last_connected_at,sort_order,jump_server_id";
+const COLUMNS: &str = "id,name,host,port,username,\"group\",tags,auth_type,key_path,color,notes,created_at,updated_at,last_connected_at,sort_order,jump_server_id,encoding";
 
 pub fn list_servers(app: &AppHandle) -> Result<Vec<ServerRecord>, String> {
     let conn = open_db(app)?;
@@ -107,13 +196,18 @@ pub fn upsert_server(
     record: &ServerRecord,
     secret: Option<&str>,
 ) -> Result<(), String> {
-    let conn = open_db(app)?;
+    // Encrypt first: the master key lookup can wait on a keychain prompt and
+    // must not hold the database meanwhile.
+    let blob = secret
+        .map(|plaintext| encrypt_secret(app, plaintext))
+        .transpose()?;
     let tags = serde_json::to_string(&record.tags).map_err(|err| err.to_string())?;
+    let conn = open_db(app)?;
 
     conn.execute(
         &format!(
             "INSERT INTO servers ({COLUMNS}, secret)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16, NULL)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17, NULL)
              ON CONFLICT(id) DO UPDATE SET
                name=excluded.name, host=excluded.host, port=excluded.port,
                username=excluded.username, \"group\"=excluded.\"group\",
@@ -122,7 +216,8 @@ pub fn upsert_server(
                notes=excluded.notes, updated_at=excluded.updated_at,
                last_connected_at=excluded.last_connected_at,
                sort_order=excluded.sort_order,
-               jump_server_id=excluded.jump_server_id"
+               jump_server_id=excluded.jump_server_id,
+               encoding=excluded.encoding"
         ),
         params![
             record.id,
@@ -141,12 +236,12 @@ pub fn upsert_server(
             record.last_connected_at.map(|value| value as i64),
             record.sort_order as i64,
             record.jump_server_id,
+            record.encoding,
         ],
     )
     .map_err(db_err)?;
 
-    if let Some(plaintext) = secret {
-        let blob = encrypt_secret(app, plaintext)?;
+    if let Some(blob) = blob {
         conn.execute(
             "UPDATE servers SET secret = ?1 WHERE id = ?2",
             params![blob, record.id],
@@ -162,6 +257,10 @@ pub fn delete_server(app: &AppHandle, id: &str) -> Result<(), String> {
     conn.execute("DELETE FROM servers WHERE id = ?1", [id])
         .map_err(db_err)?;
     conn.execute("DELETE FROM port_forwards WHERE server_id = ?1", [id])
+        .map_err(db_err)?;
+    conn.execute("DELETE FROM command_history WHERE server_id = ?1", [id])
+        .map_err(db_err)?;
+    conn.execute("DELETE FROM ai_history WHERE server_id = ?1", [id])
         .map_err(db_err)?;
     // Servers that went through this one now connect directly.
     conn.execute(
@@ -231,8 +330,7 @@ pub fn mark_connected(app: &AppHandle, id: &str) -> Result<(), String> {
 }
 
 pub fn read_secret(app: &AppHandle, id: &str) -> Result<String, String> {
-    let conn = open_db(app)?;
-    let blob: Option<Vec<u8>> = conn
+    let blob: Option<Vec<u8>> = open_db(app)?
         .query_row("SELECT secret FROM servers WHERE id = ?1", [id], |row| {
             row.get::<_, Option<Vec<u8>>>(0)
         })
@@ -246,50 +344,65 @@ pub fn read_secret(app: &AppHandle, id: &str) -> Result<String, String> {
     }
 }
 
-pub fn list_command_history(app: &AppHandle) -> Result<Vec<String>, String> {
+/// Commands typed on `server_id`, newest first. Commands recorded before
+/// history was kept per server belong to every server. Without a server, the
+/// whole history.
+pub fn list_command_history(
+    app: &AppHandle,
+    server_id: Option<&str>,
+) -> Result<Vec<String>, String> {
     let conn = open_db(app)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT command
-             FROM command_history
-             ORDER BY id DESC
-             LIMIT ?1",
-        )
-        .map_err(db_err)?;
-    let rows = stmt
-        .query_map([COMMAND_HISTORY_LIMIT], |row| row.get::<_, String>(0))
-        .map_err(db_err)?;
-
-    let mut commands = Vec::new();
-    for row in rows {
-        commands.push(row.map_err(db_err)?);
-    }
-    Ok(commands)
+    query_command_history(&conn, server_id).map_err(db_err)
 }
 
-pub fn append_command_history(app: &AppHandle, command_text: &str) -> Result<(), String> {
+fn query_command_history(
+    conn: &Connection,
+    server_id: Option<&str>,
+) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT command
+         FROM command_history
+         WHERE ?1 IS NULL OR server_id IS NULL OR server_id = ?1
+         ORDER BY id DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![server_id, COMMAND_HISTORY_LIMIT], |row| {
+        row.get::<_, String>(0)
+    })?;
+    rows.collect()
+}
+
+pub fn append_command_history(
+    app: &AppHandle,
+    server_id: Option<&str>,
+    command_text: &str,
+) -> Result<(), String> {
     let command_text = command_text.trim();
     if command_text.is_empty() {
         return Ok(());
     }
-
     let mut conn = open_db(app)?;
-    let tx = conn.transaction().map_err(db_err)?;
+    insert_command_history(&mut conn, server_id, command_text).map_err(db_err)
+}
+
+fn insert_command_history(
+    conn: &mut Connection,
+    server_id: Option<&str>,
+    command_text: &str,
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
     tx.execute(
-        "INSERT INTO command_history (command, created_at) VALUES (?1, ?2)",
-        params![command_text, now() as i64],
-    )
-    .map_err(db_err)?;
+        "INSERT INTO command_history (command, created_at, server_id) VALUES (?1, ?2, ?3)",
+        params![command_text, now() as i64, server_id],
+    )?;
     tx.execute(
         "DELETE FROM command_history
          WHERE id NOT IN (
            SELECT id FROM command_history ORDER BY id DESC LIMIT ?1
          )",
         [COMMAND_HISTORY_LIMIT],
-    )
-    .map_err(db_err)?;
-    tx.commit().map_err(db_err)?;
-    Ok(())
+    )?;
+    tx.commit()
 }
 
 pub fn list_snippets(app: &AppHandle) -> Result<Vec<Snippet>, String> {
@@ -600,42 +713,31 @@ fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<ServerRecord> {
         last_connected_at: row.get::<_, Option<i64>>(13)?.map(|value| value as u64),
         sort_order: row.get::<_, i64>(14)? as u64,
         jump_server_id: row.get(15)?,
+        encoding: row.get(16)?,
     })
 }
 
-pub(crate) fn open_db(app: &AppHandle) -> Result<Connection, String> {
-    let conn = Connection::open(db_path(app)?).map_err(db_err)?;
-    conn.execute_batch(SCHEMA).map_err(db_err)?;
-    ensure_column(
-        &conn,
-        "sort_order",
-        "ALTER TABLE servers ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
-    )?;
-    ensure_column(
-        &conn,
-        "jump_server_id",
-        "ALTER TABLE servers ADD COLUMN jump_server_id TEXT",
-    )?;
-    conn.execute_batch(COMMAND_HISTORY_SCHEMA).map_err(db_err)?;
-    conn.execute_batch(SNIPPETS_SCHEMA).map_err(db_err)?;
-    conn.execute_batch(PORT_FORWARDS_SCHEMA).map_err(db_err)?;
-    migrate_legacy_json(app, &conn)?;
-    Ok(conn)
-}
+/// The app's single database connection, opened and migrated on first use.
+/// The guard serializes access: drop it before calling anything else that
+/// opens the database.
+pub(crate) fn open_db(app: &AppHandle) -> Result<MutexGuard<'static, Connection>, String> {
+    static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
+    static OPENING: Mutex<()> = Mutex::new(());
 
-/// Add a column to `servers` in databases created before it existed.
-fn ensure_column(conn: &Connection, column: &str, alter: &str) -> Result<(), String> {
-    let exists = conn
-        .prepare("PRAGMA table_info(servers)")
-        .map_err(db_err)?
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(db_err)?
-        .filter_map(Result::ok)
-        .any(|name| name == column);
-    if !exists {
-        conn.execute(alter, []).map_err(db_err)?;
+    if DB.get().is_none() {
+        let _opening = OPENING.lock().unwrap_or_else(PoisonError::into_inner);
+        if DB.get().is_none() {
+            let mut conn = Connection::open(db_path(app)?).map_err(db_err)?;
+            prepare(&mut conn).map_err(db_err)?;
+            migrate_legacy_json(app, &conn)?;
+            let _ = DB.set(Mutex::new(conn));
+        }
     }
-    Ok(())
+    Ok(DB
+        .get()
+        .expect("database initialized above")
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner))
 }
 
 /// Best-effort one-time import of host metadata from the old `servers.json`
@@ -664,7 +766,7 @@ fn migrate_legacy_json(app: &AppHandle, conn: &Connection) -> Result<(), String>
         let _ = conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO servers ({COLUMNS}, secret)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16, NULL)"
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17, NULL)"
             ),
             params![
                 record.id,
@@ -683,6 +785,7 @@ fn migrate_legacy_json(app: &AppHandle, conn: &Connection) -> Result<(), String>
                 record.last_connected_at.map(|value| value as i64),
                 record.sort_order as i64,
                 record.jump_server_id,
+                record.encoding,
             ],
         );
     }
@@ -691,72 +794,111 @@ fn migrate_legacy_json(app: &AppHandle, conn: &Connection) -> Result<(), String>
     Ok(())
 }
 
-/// Encrypt a secret with AES-256-GCM. The output is `nonce (12 bytes) ||
-/// ciphertext` and is stored verbatim in the `secret` BLOB column.
-pub(crate) fn encrypt_secret(app: &AppHandle, plaintext: &str) -> Result<Vec<u8>, String> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&master_key(app)?));
-    let mut nonce_bytes = [0u8; 12];
-    getrandom::getrandom(&mut nonce_bytes).map_err(|err| format!("无法生成随机数：{err}"))?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_bytes())
-        .map_err(|_| "密码加密失败".to_string())?;
-
-    let mut blob = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
-    blob.extend_from_slice(&nonce_bytes);
-    blob.extend_from_slice(&ciphertext);
-    Ok(blob)
-}
-
-pub(crate) fn decrypt_secret(app: &AppHandle, blob: &[u8]) -> Result<String, String> {
-    if blob.len() < 12 {
-        return Err("密码数据已损坏".into());
-    }
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&master_key(app)?));
-    let nonce = Nonce::from_slice(&blob[..12]);
-    let plaintext = cipher
-        .decrypt(nonce, &blob[12..])
-        .map_err(|_| "密码解密失败，请重新编辑主机并保存密码".to_string())?;
-    String::from_utf8(plaintext).map_err(|_| "密码解码失败".to_string())
-}
-
-/// Load the local AES master key, generating and persisting a fresh random key
-/// on first use. The key lives in the app data directory with 0600 permissions.
-fn master_key(app: &AppHandle) -> Result<[u8; 32], String> {
-    let path = app_data_dir(app)?.join(KEY_FILE);
-    if let Ok(bytes) = fs::read(&path) {
-        if bytes.len() == 32 {
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&bytes);
-            return Ok(key);
-        }
-    }
-
-    let mut key = [0u8; 32];
-    getrandom::getrandom(&mut key).map_err(|err| format!("无法生成本地主密钥：{err}"))?;
-    fs::write(&path, key).map_err(|err| format!("无法写入本地主密钥：{err}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = fs::Permissions::from_mode(0o600);
-        let _ = fs::set_permissions(&path, permissions);
-    }
-    Ok(key)
-}
-
-fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|err| format!("无法定位应用数据目录：{err}"))?;
-    fs::create_dir_all(&dir).map_err(|err| format!("无法创建应用数据目录：{err}"))?;
-    Ok(dir)
-}
-
 fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir(app)?.join(DB_FILE))
 }
 
 fn db_err(err: rusqlite::Error) -> String {
     format!("本地数据库错误：{err}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn version(conn: &Connection) -> i64 {
+        conn.pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap()
+    }
+
+    fn columns(conn: &Connection, table: &str) -> Vec<String> {
+        conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    #[test]
+    fn a_new_database_gets_every_migration_once() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare(&mut conn).unwrap();
+        assert_eq!(version(&conn), MIGRATIONS.len() as i64);
+        assert!(columns(&conn, "command_history").contains(&"server_id".to_string()));
+        assert!(columns(&conn, "ai_history").contains(&"summary".to_string()));
+        // Opening again changes nothing.
+        prepare(&mut conn).unwrap();
+        assert_eq!(version(&conn), MIGRATIONS.len() as i64);
+    }
+
+    /// A database from before `sort_order`, `jump_server_id` and versioning.
+    #[test]
+    fn an_unversioned_database_is_upgraded_in_place() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE servers (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, host TEXT NOT NULL,
+                port INTEGER NOT NULL, username TEXT NOT NULL, \"group\" TEXT NOT NULL,
+                tags TEXT NOT NULL, auth_type TEXT NOT NULL, key_path TEXT,
+                color TEXT NOT NULL, notes TEXT NOT NULL, secret BLOB,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                last_connected_at INTEGER
+            );
+            INSERT INTO servers VALUES
+                ('a','web','10.0.0.1',22,'root','Default','[]','password',NULL,'','',x'0102',1,1,NULL);
+            CREATE TABLE command_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, command TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            INSERT INTO command_history (command, created_at) VALUES ('uptime', 1);
+            CREATE TABLE ai_history (id TEXT PRIMARY KEY, encrypted BLOB NOT NULL);
+            INSERT INTO ai_history VALUES ('h', x'00');",
+        )
+        .unwrap();
+
+        prepare(&mut conn).unwrap();
+
+        assert_eq!(version(&conn), MIGRATIONS.len() as i64);
+        let sql = format!("SELECT {COLUMNS} FROM servers WHERE id = 'a'");
+        let server = conn.query_row(&sql, [], row_to_record).unwrap();
+        assert_eq!((server.name.as_str(), server.sort_order), ("web", 0));
+        assert_eq!(server.jump_server_id, None);
+        let secret: Vec<u8> = conn
+            .query_row("SELECT secret FROM servers WHERE id = 'a'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(secret, [1, 2]);
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ai_history WHERE server_id IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 1);
+    }
+
+    #[test]
+    fn command_history_is_kept_per_server() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare(&mut conn).unwrap();
+        insert_command_history(&mut conn, None, "legacy").unwrap();
+        insert_command_history(&mut conn, Some("a"), "on-a").unwrap();
+        insert_command_history(&mut conn, Some("b"), "on-b").unwrap();
+
+        assert_eq!(
+            query_command_history(&conn, Some("a")).unwrap(),
+            ["on-a", "legacy"]
+        );
+        assert_eq!(
+            query_command_history(&conn, Some("b")).unwrap(),
+            ["on-b", "legacy"]
+        );
+        assert_eq!(
+            query_command_history(&conn, None).unwrap(),
+            ["on-b", "on-a", "legacy"]
+        );
+    }
 }

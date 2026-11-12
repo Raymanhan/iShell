@@ -120,6 +120,13 @@ pub fn assess(name: &str, args: &Value) -> Risk {
             risk("low", "低风险", "只读操作，不修改服务器")
         };
     }
+    if name == "read_terminal" {
+        return risk(
+            "low",
+            "低风险",
+            "读取当前终端的最近输出，不在服务器上执行操作",
+        );
+    }
     if name != "shell" {
         return risk("high", "高风险", "未知工具");
     }
@@ -407,6 +414,9 @@ mod tests {
             "medium"
         );
         assert_eq!(normalize_path("~/a/../b//c"), "~/b/c");
+        let terminal = assess("read_terminal", &json!({}));
+        assert_eq!(terminal.level, "low");
+        assert!(needs_approval("ask", &terminal));
     }
 
     #[test]

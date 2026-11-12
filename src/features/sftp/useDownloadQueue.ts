@@ -116,13 +116,13 @@ export function useDownloadQueue({
     try {
       const saved = isTauri
         ? item.folderMode
-          ? await command<string>("sftp_download_folder", {
+          ? await command("sftp_download_folder", {
               id: item.serverId,
               path: item.remotePath,
               transferId: item.id,
               mode: item.folderMode,
             })
-          : await command<string>("sftp_download", {
+          : await command("sftp_download", {
               id: item.serverId,
               path: item.remotePath,
               transferId: item.id,

@@ -58,7 +58,13 @@ export function frontendKeys() {
 
 // Text that only the model reads (system prompts, tool schemas, compaction
 // prompts) is never shown to users and stays in Chinese.
-const MODEL_FACING = ["你只负责压缩", "历史片段", "[已压缩", "[已自动压缩", "（用户要求摘要", "{system}", "当前权限模式"];
+const MODEL_FACING = [
+  "你只负责压缩", "历史片段", "[已压缩", "[已自动压缩", "（用户要求摘要", "{system}", "当前权限模式",
+  "[当前权限模式", "你把用户的需求描述", "终端最近输出", "读取当前终端的最近输出", "在哪些服务器上执行",
+  "\n\n[原模型未继续",
+];
+// Test-only sources: their strings never reach the UI.
+const TEST_FILES = new Set(["src-tauri/src/live_tests.rs"]);
 // Messages assembled by string concatenation in the remote runner.
 const EXTRA_BACKEND = ["已写入 {0}"];
 // Hand-reviewed Traditional Chinese that should override the OpenCC output.
@@ -115,8 +121,10 @@ function rustTemplate(value) {
 export function backendKeys() {
   const keys = new Map();
   for (const file of gitFiles("src-tauri/src", /\.rs$/)) {
+    if (TEST_FILES.has(file)) continue;
     let text = fs.readFileSync(path.join(repo, file), "utf8");
-    const testStart = text.indexOf("#[cfg(test)]");
+    // The unit tests: a `#[cfg(test)]` module, not a single test-only item.
+    const testStart = text.search(/#\[cfg\(test\)\]\s*mod \w+\s*\{/);
     if (testStart >= 0) text = text.slice(0, testStart);
     const definitions = text.indexOf("pub fn definitions()");
     if (definitions >= 0) {

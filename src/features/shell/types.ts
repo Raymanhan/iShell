@@ -13,6 +13,8 @@ export interface ShellTab {
   host: string;
   color: string;
   sessionId: string | null;
+  /** The session's terminal encoding: the server's, unless switched for this tab. */
+  encoding?: string;
   state: ShellState;
   status: ServerStatus | null;
   networkSample: NetworkSample | null;

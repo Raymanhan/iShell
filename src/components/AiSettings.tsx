@@ -8,6 +8,8 @@ import {
   type AiPermission,
   type AiModel,
   mergeModelSources,
+  AI_PROVIDER_DEFAULT_URLS,
+  type AiProvider,
 } from "../features/ai/types";
 
 import { t } from "../i18n";
@@ -18,6 +20,7 @@ export function AiSettings({
   config: AiConfig;
   onSaved: (config: AiConfig) => void;
 }) {
+  const [provider, setProvider] = useState<AiProvider>(config.provider || "openai");
   const [baseUrl, setBaseUrl] = useState(config.baseUrl);
   const [apiKey, setApiKey] = useState("");
   const [clearKey, setClearKey] = useState(false);
@@ -52,6 +55,7 @@ export function AiSettings({
   }
   function input(): AiConfigInput {
     return {
+      provider,
       baseUrl,
       apiKey: clearKey ? "" : apiKey.trim() || null,
       models: modelList,
@@ -69,10 +73,11 @@ export function AiSettings({
     try {
       if (!isTauri)
         throw new Error(t("请在桌面客户端保存 AI 设置；预览模式不保存密钥。"));
-      const value = await command<AiConfig>("ai_save_config", {
+      const value = await command("ai_save_config", {
         input: input(),
       });
       onSaved(value);
+      setProvider(value.provider || "openai");
       setBaseUrl(value.baseUrl);
       setApiKey("");
       setClearKey(false);
@@ -95,7 +100,7 @@ export function AiSettings({
     setNotice("");
     try {
       if (!isTauri) throw new Error(t("请在桌面客户端测试连接。"));
-      const fetched = await command<AiModel[]>("ai_list_models", {
+      const fetched = await command("ai_list_models", {
         input: input(),
       });
       if (request !== generation.current) return;
@@ -140,18 +145,40 @@ export function AiSettings({
       )}
       <fieldset disabled={Boolean(busy)}>
         <label>
-          {t("API 地址")}<input
+          {t("服务类型")}
+          <select
+            value={provider}
+            onChange={(e) => {
+              const next = e.target.value as AiProvider;
+              // Keep a custom address; swap only the other service's default.
+              if (!baseUrl.trim() || baseUrl === AI_PROVIDER_DEFAULT_URLS[provider]) {
+                setBaseUrl(AI_PROVIDER_DEFAULT_URLS[next]);
+              }
+              setProvider(next);
+              invalidateMetadata();
+            }}
+          >
+            <option value="openai">{t("OpenAI 兼容（Chat Completions）")}</option>
+            <option value="anthropic">{t("Anthropic（Claude Messages API）")}</option>
+          </select>
+        </label>
+        <label>
+          {t("API 地址")}
+          <input
             value={baseUrl}
             onChange={(e) => {
               setBaseUrl(e.target.value);
               invalidateMetadata();
             }}
-            placeholder="https://api.openai.com/v1"
+            placeholder={AI_PROVIDER_DEFAULT_URLS[provider]}
             spellCheck={false}
           />
         </label>
         <small>
-          {t("填写包含 /v1 的服务根地址，也支持粘贴完整 /chat/completions 地址。")}</small>
+          {provider === "anthropic"
+            ? t("Claude 官方接口为 https://api.anthropic.com；思考过程以摘要显示，模型拒绝时会自动转由推荐的备用模型继续。")
+            : t("填写包含 /v1 的服务根地址，也支持粘贴完整 /chat/completions 地址。")}
+        </small>
         <label>
           {t("API 密钥")}<input
             type="password"
@@ -165,7 +192,9 @@ export function AiSettings({
             placeholder={
               config.hasApiKey
                 ? t("已保存，留空保留原密钥")
-                : t("sk-…（本地服务可留空）")
+                : provider === "anthropic"
+                  ? "sk-ant-…"
+                  : t("sk-…（本地服务可留空）")
             }
           />
         </label>

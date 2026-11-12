@@ -11,15 +11,17 @@ use std::{
     io::{Cursor, Read, Write},
     sync::{Arc, Mutex},
 };
-use tauri::{AppHandle, State, WebviewWindow};
+use tauri::{ipc::Channel, AppHandle, State, WebviewWindow};
 use uuid::Uuid;
 
+use crate::zmodem_files;
 use crate::{
+    error::AppResult,
     models::{
         ConnectionExport, ConnectionExportServer, ConnectionImport, ConnectionImportServer,
         EncryptedExportSecret, NetworkSample, PortForward, PortForwardInput, PortForwardStatus,
         ServerInput, ServerOrderInput, ServerRecord, ServerStatus, SftpEntry, Snippet,
-        SnippetInput, TerminalSnapshotPayload,
+        SnippetInput,
     },
     pool::SshPool,
     process_monitor::ProcessMonitorRegistry,
@@ -27,6 +29,7 @@ use crate::{
         download_file, download_folder, fetch_network_sample as fetch_network, fetch_status,
         list_sftp, make_directory, read_text_file, remove_entry, rename_entry,
         resolve_sftp_directory, test_connection, upload_file, upload_folder, write_text_file,
+        TextFile,
     },
     store::{
         append_command_history, delete_port_forward as remove_port_forward,
@@ -177,6 +180,7 @@ fn server_record_to_input(server: ServerRecord) -> ServerInput {
         color: server.color,
         notes: server.notes,
         jump_server_id: server.jump_server_id,
+        encoding: Some(server.encoding),
         sort_order: Some(server.sort_order),
     }
 }
@@ -281,6 +285,13 @@ pub fn save_server(
         jump_server_id: input
             .jump_server_id
             .filter(|jump_id| !jump_id.trim().is_empty()),
+        encoding: match input.encoding.as_deref() {
+            Some(label) => crate::encoding::normalize(label)?,
+            None => current
+                .as_ref()
+                .map(|server| server.encoding.clone())
+                .unwrap_or_else(|| crate::encoding::DEFAULT.into()),
+        },
         sort_order: input
             .sort_order
             .or_else(|| current.as_ref().map(|server| server.sort_order))
@@ -483,13 +494,26 @@ pub fn port_forward_statuses(tunnels: State<'_, Arc<TunnelRegistry>>) -> Vec<Por
 }
 
 #[tauri::command]
-pub fn list_command_history(app: AppHandle) -> Result<Vec<String>, String> {
-    load_command_history(&app)
+pub async fn list_command_history(
+    app: AppHandle,
+    server_id: Option<String>,
+) -> Result<Vec<String>, String> {
+    run_blocking(move || load_command_history(&app, server_id.as_deref())).await
 }
 
 #[tauri::command]
-pub fn save_command_history(app: AppHandle, command_text: String) -> Result<(), String> {
-    append_command_history(&app, &command_text)
+pub async fn save_command_history(
+    app: AppHandle,
+    server_id: Option<String>,
+    command_text: String,
+) -> Result<(), String> {
+    run_blocking(move || append_command_history(&app, server_id.as_deref(), &command_text)).await
+}
+
+/// Where the key that encrypts saved passwords is kept: `keychain` or `file`.
+#[tauri::command]
+pub async fn secret_storage(app: AppHandle) -> Result<&'static str, String> {
+    run_blocking(move || crate::secrets::storage(&app).map(|storage| storage.as_str())).await
 }
 
 #[tauri::command]
@@ -771,11 +795,13 @@ pub async fn sftp_read_text_file(
     pool: State<'_, Arc<SshPool>>,
     id: String,
     path: String,
-) -> Result<String, String> {
+) -> Result<TextFile, String> {
     let pool = pool.inner().clone();
     run_blocking(move || read_text_file(&pool, &app, &id, &path)).await
 }
 
+/// Save an edited file and return its new revision. `expected_revision` is
+/// the revision the editor read; omit it to overwrite whatever is there.
 #[tauri::command]
 pub async fn sftp_write_text_file(
     app: AppHandle,
@@ -783,22 +809,53 @@ pub async fn sftp_write_text_file(
     id: String,
     path: String,
     content: String,
-) -> Result<(), String> {
+    expected_revision: Option<String>,
+) -> AppResult<String> {
     let pool = pool.inner().clone();
-    run_blocking(move || {
-        let result = write_text_file(&pool, &app, &id, &path, &content);
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = write_text_file(
+            &pool,
+            &app,
+            &id,
+            &path,
+            &content,
+            expected_revision.as_deref(),
+        );
         telemetry::observe(&app, EventKind::SftpWrite, Some(&id), result)
     })
     .await
+    .map_err(|err| format!("后台任务失败：{err}"))?
 }
 
+/// Start a terminal session on a server. Panes receive its output by
+/// attaching (`attach_terminal`), which replays everything so far.
 #[tauri::command]
 pub fn open_terminal(
     app: AppHandle,
     registry: State<'_, Arc<TerminalRegistry>>,
     id: String,
 ) -> Result<String, String> {
-    terminal::open_terminal(app, registry, id)
+    terminal::open_terminal(app, registry.inner(), id, None)
+}
+
+/// Show an existing session in another pane: its buffered output is replayed
+/// on `on_output`, followed by everything new.
+#[tauri::command]
+pub fn attach_terminal(
+    registry: State<'_, Arc<TerminalRegistry>>,
+    session_id: String,
+    on_output: Channel,
+) -> Result<String, String> {
+    terminal::attach_terminal(registry.inner(), &session_id, on_output)
+}
+
+#[tauri::command]
+pub fn detach_terminal(
+    registry: State<'_, Arc<TerminalRegistry>>,
+    session_id: String,
+    channel_id: u32,
+) {
+    terminal::detach_terminal(registry.inner(), &session_id, channel_id)
 }
 
 #[tauri::command]
@@ -807,7 +864,7 @@ pub fn terminal_input(
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    terminal::terminal_input(registry, session_id, data)
+    terminal::terminal_type(registry.inner(), &session_id, &data)
 }
 
 #[tauri::command]
@@ -817,21 +874,88 @@ pub fn terminal_resize(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    terminal::terminal_resize(registry, session_id, cols, rows)
+    terminal::terminal_resize(registry.inner(), &session_id, cols, rows)
 }
 
+/// Switch a running session's encoding, e.g. after seeing garbled output.
 #[tauri::command]
-pub fn close_terminal(
+pub fn terminal_set_encoding(
     registry: State<'_, Arc<TerminalRegistry>>,
     session_id: String,
+    encoding: String,
+) -> Result<String, String> {
+    terminal::set_encoding(registry.inner(), &session_id, &encoding)
+}
+
+/// A header of a raw-body request.
+fn request_header(request: &tauri::ipc::Request<'_>, name: &str) -> Result<String, String> {
+    request
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .ok_or_else(|| format!("缺少请求头 {name}"))
+}
+
+fn raw_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a Vec<u8>, String> {
+    match request.body() {
+        tauri::ipc::InvokeBody::Raw(data) => Ok(data),
+        _ => Err("请求体应为原始字节".into()),
+    }
+}
+
+/// Raw bytes for a terminal session, sent unencoded (ZMODEM transfers). The
+/// body is the bytes; the `session-id` header names the session.
+#[tauri::command]
+pub fn terminal_write(
+    registry: State<'_, Arc<TerminalRegistry>>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
-    terminal::close_terminal(registry, session_id)
+    let session_id = request_header(&request, "session-id")?;
+    terminal::terminal_input(registry.inner(), &session_id, raw_body(&request)?.clone())
+}
+
+/// Pick files to send for `rz`; empty when cancelled.
+#[tauri::command]
+pub async fn zmodem_pick_files(app: AppHandle) -> Result<Vec<zmodem_files::PickedFile>, String> {
+    zmodem_files::pick(&app).await
 }
 
 #[tauri::command]
-pub fn terminal_snapshot(
-    registry: State<'_, Arc<TerminalRegistry>>,
-    session_id: String,
-) -> Result<TerminalSnapshotPayload, String> {
-    terminal::terminal_snapshot(registry, session_id)
+pub fn zmodem_read_file(
+    files: State<'_, zmodem_files::PickedFiles>,
+    id: String,
+    offset: u64,
+    length: u64,
+) -> Result<tauri::ipc::Response, String> {
+    files
+        .read(&id, offset, length)
+        .map(tauri::ipc::Response::new)
+}
+
+#[tauri::command]
+pub fn zmodem_forget_files(files: State<'_, zmodem_files::PickedFiles>, ids: Vec<String>) {
+    files.forget(&ids)
+}
+
+/// Save a file received with `sz` in the downloads folder. The body is the
+/// file; the `file-name` header is its name, UTF-8 in base64.
+#[tauri::command]
+pub fn zmodem_save_file(
+    app: AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<String, String> {
+    use base64::Engine;
+    let encoded = request_header(&request, "file-name")?;
+    let name = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .ok_or("文件名无效")?;
+    zmodem_files::save(&app, &name, raw_body(&request)?)
+}
+
+#[tauri::command]
+pub fn close_terminal(registry: State<'_, Arc<TerminalRegistry>>, session_id: String) {
+    terminal::close_terminal(registry.inner(), &session_id)
 }

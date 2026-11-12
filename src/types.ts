@@ -14,6 +14,8 @@ export interface ServerRecord {
   notes: string;
   /** Another saved server to connect through (jump host), if any. */
   jumpServerId?: string | null;
+  /** The terminal's character encoding, e.g. "UTF-8" or "GBK". */
+  encoding?: string;
   sortOrder: number;
   createdAt: number;
   updatedAt: number;
@@ -33,6 +35,7 @@ export interface ServerInput {
   color: string;
   notes: string;
   jumpServerId?: string | null;
+  encoding?: string | null;
   sortOrder?: number | null;
 }
 
@@ -186,28 +189,6 @@ export interface TailStatusPayload {
   viewerId: string;
   state: TailMonitorState;
   message?: string | null;
-}
-
-export interface TerminalDataPayload {
-  sessionId: string;
-  offset: number;
-  data: string;
-}
-
-export interface TerminalReadyPayload {
-  sessionId: string;
-}
-
-export interface TerminalSnapshotPayload {
-  data: string;
-  startOffset: number;
-  endOffset: number;
-  ready: boolean;
-}
-
-export interface TerminalClosedPayload {
-  sessionId: string;
-  reason: string;
 }
 
 export interface Snippet {

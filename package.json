@@ -1,6 +1,6 @@
 {
   "name": "ishell",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "A lightweight Tauri SSH and SFTP workbench",
   "private": true,
   "license": "MIT",
@@ -22,6 +22,13 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/legacy-modes": "^6.5.5",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@lezer/highlight": "^1.2.5",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "~2.5.4",
@@ -29,12 +36,15 @@
     "@tauri-apps/plugin-updater": "^2.14.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
+    "@xterm/addon-unicode11": "^0.9.0",
+    "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
     "lucide-react": "^1.21.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "zmodem.js": "^0.1.10"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.4",

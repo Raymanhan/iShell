@@ -16,6 +16,7 @@ pub fn definitions() -> Value {
         {"type":"function","function":{"name":"shell","description":"在当前服务器执行非交互 Shell 命令。每次调用是独立进程；指定 cwd。使用 sudo -n；服务使用 systemctl 或重定向后的 nohup。返回真实输出和退出码。","parameters":{"type":"object","properties":{"description":{"type":"string","description":"一句话说明这次操作的目的，显示在界面上代替命令标题，例如“检查磁盘占用”。不超过 20 个字，使用与用户相同的语言。"},"command":{"type":"string"},"cwd":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":1800}},"required":["description","command"]}}},
         {"type":"function","function":{"name":"run_code","description":"编写并在当前服务器执行 Python、Shell 或 Node.js 代码，适合部署脚本、排查与批量操作。代码存于临时文件，执行后清理。","parameters":{"type":"object","properties":{"description":{"type":"string","description":"一句话说明这次操作的目的，显示在界面上代替命令标题，例如“检查磁盘占用”。不超过 20 个字，使用与用户相同的语言。"},"language":{"type":"string","enum":["python","shell","javascript"]},"code":{"type":"string"},"cwd":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":1800}},"required":["description","language","code"]}}},
         {"type":"function","function":{"name":"read_file","description":"读取当前服务器 UTF-8 文本文件，最多 16000 字符；更大的文件可用 shell 分段查看。","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
+        {"type":"function","function":{"name":"read_terminal","description":"读取用户当前终端最近的输出（纯文本，最多 2000 行），用于了解用户刚执行的命令及其报错。只读，不在服务器上执行任何操作。","parameters":{"type":"object","properties":{"lines":{"type":"integer","minimum":1,"maximum":2000}}}}},
         {"type":"function","function":{"name":"write_file","description":"在当前服务器创建或完整替换 UTF-8 文件（原子写入）。需先检查现有内容；父目录须已存在。保留现有文件权限，新文件为 0600。","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}}
     ])
 }
@@ -28,6 +29,7 @@ pub fn validate(name: &str, args: &Value) -> Result<(), String> {
         "shell" => &["command"],
         "run_code" => &["language", "code"],
         "read_file" => &["path"],
+        "read_terminal" => &[],
         "write_file" => &["path", "content"],
         _ => return Err(format!("不支持的工具：{name}")),
     };
@@ -45,6 +47,11 @@ pub fn validate(name: &str, args: &Value) -> Result<(), String> {
         )
     {
         return Err("不支持的代码语言".into());
+    }
+    if let Some(lines) = args.get("lines") {
+        if !lines.as_u64().is_some_and(|v| (1..=2000).contains(&v)) {
+            return Err("行数应在 1–2000 之间".into());
+        }
     }
     if let Some(timeout) = args.get("timeout") {
         if !timeout.as_u64().is_some_and(|v| (1..=1800).contains(&v)) {
@@ -100,8 +107,29 @@ pub(crate) fn next_poll_interval(current: Duration, changed: bool) -> Duration {
     }
 }
 
+/// The recent output of the terminal a task is bound to.
+pub fn read_terminal(terminals: &TerminalRegistry, session: &str, args: &Value) -> Value {
+    let lines = args["lines"].as_u64().unwrap_or(200) as usize;
+    match terminals.recent_text(session, lines) {
+        Some(text) => {
+            let truncated = text.chars().count() > 16_000;
+            let text: String = {
+                let skip = text.chars().count().saturating_sub(16_000);
+                text.chars().skip(skip).collect()
+            };
+            json!({"status":"done","stdout":text,"stderr":"","exitCode":0,"truncated":truncated})
+        }
+        None => {
+            json!({"status":"done","error":"终端会话已关闭","stdout":"","stderr":"","exitCode":null})
+        }
+    }
+}
+
 pub fn execute(context: Context, id: String, name: String, args: Value) -> Result<Value, String> {
     validate(&name, &args)?;
+    if name == "read_terminal" {
+        return Ok(read_terminal(&context.terminals, &context.session, &args));
+    }
     let Context {
         app,
         server,
@@ -203,11 +231,15 @@ mod tests {
         )
         .is_ok());
         assert!(validate("write_file", &json!({"path":"~/a","content":""})).is_ok());
+        assert!(validate("read_terminal", &json!({})).is_ok());
+        assert!(validate("read_terminal", &json!({"lines":50})).is_ok());
         for (name, args) in [
             ("unknown", json!({})),
             ("shell", json!({"command":"x","timeout":0})),
             ("run_code", json!({"language":"ruby","code":"x"})),
             ("read_file", json!({"path":"relative"})),
+            ("read_terminal", json!({"lines":0})),
+            ("read_terminal", json!({"lines":5000})),
             ("shell", json!({"command":"x","cwd":12})),
         ] {
             assert!(validate(name, &args).is_err());

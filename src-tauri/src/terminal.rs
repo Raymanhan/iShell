@@ -1,6 +1,21 @@
+//! Interactive terminal sessions.
+//!
+//! A session's output is kept as raw bytes: the remote side decides the
+//! encoding and the frontend decodes it with the session's encoding (the
+//! server's setting, UTF-8 by default, switchable while it runs), so nothing
+//! is lost or replaced on the way. Typed text is encoded the same way. Each pane showing
+//! a session subscribes with its own IPC channel and receives binary frames;
+//! attaching replays the buffered output and subscribes in one step, so no
+//! output can fall between the two.
+//!
+//! A frame is one byte of kind, eight bytes of little-endian offset, then the
+//! payload: output bytes for `FRAME_DATA` (the offset is where they start in
+//! the session's output), nothing for `FRAME_READY`, and the UTF-8 reason for
+//! `FRAME_CLOSED`.
+
 use std::{
-    collections::{HashMap, HashSet},
-    sync::{mpsc, Arc, Mutex},
+    collections::HashMap,
+    sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError},
     thread,
 };
 
@@ -10,10 +25,16 @@ use std::{
     time::Duration,
 };
 
+use encoding_rs::Encoding;
 #[cfg(not(russh_backend))]
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{
+    ipc::{Channel, InvokeResponseBody},
+    AppHandle,
+};
 use uuid::Uuid;
+
+use crate::{encoding, local_shell};
 
 #[cfg(not(russh_backend))]
 use crate::models::ServerRecord;
@@ -21,358 +42,446 @@ use crate::models::ServerRecord;
 use crate::openssh;
 #[cfg(not(russh_backend))]
 use crate::store::jump_hops;
-use crate::{
-    models::{
-        TerminalClosedPayload, TerminalDataPayload, TerminalReadyPayload, TerminalSnapshotPayload,
-    },
-    store::{get_server, mark_connected, read_secret},
-    telemetry::{self, EventKind},
-};
+use crate::store::{get_server, mark_connected, read_secret};
+use crate::telemetry::{self, EventKind};
 
-#[derive(Default)]
-pub struct TerminalRegistry {
-    servers: Mutex<HashMap<String, String>>,
-    sessions: Mutex<HashMap<String, mpsc::Sender<TerminalControl>>>,
-    output_buffers: Mutex<HashMap<String, String>>,
-    output_starts: Mutex<HashMap<String, usize>>,
-    output_offsets: Mutex<HashMap<String, usize>>,
-    ready_sessions: Mutex<HashSet<String>>,
-}
+pub const FRAME_DATA: u8 = 0;
+pub const FRAME_READY: u8 = 1;
+pub const FRAME_CLOSED: u8 = 2;
+
+/// Output kept per session for panes that attach later (a tab moved to
+/// another window, say). Trimmed in batches once it passes the maximum.
+const MAX_BUFFER_BYTES: usize = 512 * 1024;
+const TARGET_BUFFER_BYTES: usize = 384 * 1024;
+/// More panes than this on one session means some never detached.
+const MAX_SUBSCRIBERS: usize = 8;
 
 pub(crate) enum TerminalControl {
-    Input(String),
+    Input(Vec<u8>),
     Resize { cols: u16, rows: u16 },
     Close,
 }
 
-#[derive(Default)]
-struct Utf8StreamDecoder {
-    pending: Vec<u8>,
+fn frame(kind: u8, offset: u64, payload: &[u8]) -> InvokeResponseBody {
+    let mut bytes = Vec::with_capacity(9 + payload.len());
+    bytes.push(kind);
+    bytes.extend_from_slice(&offset.to_le_bytes());
+    bytes.extend_from_slice(payload);
+    InvokeResponseBody::Raw(bytes)
 }
 
-impl Utf8StreamDecoder {
-    fn push(&mut self, bytes: &[u8]) -> String {
-        self.pending.extend_from_slice(bytes);
-        let mut output = String::new();
+struct Session {
+    server_id: String,
+    control: mpsc::Sender<TerminalControl>,
+    encoding: &'static Encoding,
+    /// The most recent output; `start` is its offset in the whole output.
+    buffer: Vec<u8>,
+    start: u64,
+    ready: bool,
+    closed: Option<String>,
+    subscribers: Vec<Channel>,
+}
 
-        loop {
-            match std::str::from_utf8(&self.pending) {
-                Ok(text) => {
-                    output.push_str(text);
-                    self.pending.clear();
-                    break;
-                }
-                Err(error) => {
-                    let valid_up_to = error.valid_up_to();
-                    if valid_up_to > 0 {
-                        let valid = std::str::from_utf8(&self.pending[..valid_up_to])
-                            .expect("validated UTF-8 prefix");
-                        output.push_str(valid);
-                        self.pending.drain(..valid_up_to);
-                    }
-
-                    match error.error_len() {
-                        Some(length) => {
-                            output.push('\u{fffd}');
-                            self.pending.drain(..length);
-                        }
-                        None => break,
-                    }
-                }
-            }
-        }
-
-        output
+impl Session {
+    fn end(&self) -> u64 {
+        self.start + self.buffer.len() as u64
     }
 
-    #[cfg(any(not(russh_backend), test))]
-    fn finish(&mut self) -> String {
-        let output = String::from_utf8_lossy(&self.pending).to_string();
-        self.pending.clear();
-        output
+    /// Send to every subscriber, dropping those whose window has gone.
+    fn broadcast(&mut self, kind: u8, offset: u64, payload: &[u8]) {
+        self.subscribers
+            .retain(|channel| channel.send(frame(kind, offset, payload)).is_ok());
+    }
+
+    fn push_output(&mut self, data: &[u8]) {
+        let offset = self.end();
+        self.buffer.extend_from_slice(data);
+        if self.buffer.len() > MAX_BUFFER_BYTES {
+            let drop = self.buffer.len() - TARGET_BUFFER_BYTES;
+            self.buffer.drain(..drop);
+            self.start += drop as u64;
+        }
+        self.broadcast(FRAME_DATA, offset, data);
+    }
+
+    /// Replay what this session has to a new subscriber.
+    fn replay(&self, channel: &Channel) -> Result<(), String> {
+        let send = |body| channel.send(body).map_err(|err| err.to_string());
+        if !self.buffer.is_empty() {
+            send(frame(FRAME_DATA, self.start, &self.buffer))?;
+        }
+        if self.ready {
+            send(frame(FRAME_READY, self.end(), &[]))?;
+        }
+        if let Some(reason) = &self.closed {
+            send(frame(FRAME_CLOSED, self.end(), reason.as_bytes()))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct TerminalRegistry {
+    sessions: Mutex<HashMap<String, Arc<Mutex<Session>>>>,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl TerminalRegistry {
+    fn session(&self, session_id: &str) -> Option<Arc<Mutex<Session>>> {
+        lock(&self.sessions).get(session_id).cloned()
+    }
+
+    fn with_session<T>(
+        &self,
+        session_id: &str,
+        action: impl FnOnce(&mut Session) -> T,
+    ) -> Option<T> {
+        self.session(session_id)
+            .map(|session| action(&mut lock(&session)))
+    }
+
+    /// Whether `session_id` is a live, logged-in terminal to `server_id`.
+    pub(crate) fn connected_to(&self, session_id: &str, server_id: &str) -> bool {
+        self.with_session(session_id, |session| {
+            session.server_id == server_id && session.ready && session.closed.is_none()
+        })
+        .unwrap_or(false)
+    }
+
+    /// The last `lines` lines of a session's output as plain text, for the
+    /// AI: escape sequences removed, overwritten line content resolved.
+    pub(crate) fn recent_text(&self, session_id: &str, lines: usize) -> Option<String> {
+        let (bytes, encoding) = self.with_session(session_id, |session| {
+            let skip = session.buffer.len().saturating_sub(256 * 1024);
+            (session.buffer[skip..].to_vec(), session.encoding)
+        })?;
+        Some(plain_lines(&encoding::decode(encoding, &bytes), lines))
+    }
+
+    /// Whether the session exists and has not ended.
+    #[cfg(test)]
+    pub(crate) fn is_open(&self, session_id: &str) -> bool {
+        self.with_session(session_id, |session| session.closed.is_none())
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn output(&self, session_id: &str, data: &[u8]) {
+        if !data.is_empty() {
+            self.with_session(session_id, |session| session.push_output(data));
+        }
+    }
+
+    pub(crate) fn mark_ready(&self, session_id: &str) {
+        self.with_session(session_id, |session| {
+            if !session.ready {
+                session.ready = true;
+                let end = session.end();
+                session.broadcast(FRAME_READY, end, &[]);
+            }
+        });
+    }
+
+    fn was_ready(&self, session_id: &str) -> bool {
+        self.with_session(session_id, |session| session.ready)
+            .unwrap_or(false)
+    }
+
+    /// The session ended on its own. It stays registered, so a pane that
+    /// attaches later still shows its output and why it ended, until closed.
+    fn mark_closed(&self, session_id: &str, reason: String) {
+        self.with_session(session_id, |session| {
+            let end = session.end();
+            session.broadcast(FRAME_CLOSED, end, reason.as_bytes());
+            session.closed = Some(reason);
+        });
+    }
+
+    fn send(&self, session_id: &str, control: TerminalControl) -> Result<(), String> {
+        let sender = self
+            .with_session(session_id, |session| {
+                session.closed.is_none().then(|| session.control.clone())
+            })
+            .ok_or_else(|| "找不到终端会话".to_string())?
+            .ok_or_else(|| "终端会话已关闭，请重新连接".to_string())?;
+        sender
+            .send(control)
+            .map_err(|_| "终端会话已关闭，请重新连接".to_string())
+    }
+}
+
+/// Register a new session and return its id and control receiver.
+fn register(
+    registry: &TerminalRegistry,
+    server_id: &str,
+    session_encoding: &'static Encoding,
+    channel: Option<Channel>,
+) -> (String, mpsc::Receiver<TerminalControl>) {
+    let session_id = Uuid::new_v4().to_string();
+    let (sender, receiver) = mpsc::channel::<TerminalControl>();
+    lock(&registry.sessions).insert(
+        session_id.clone(),
+        Arc::new(Mutex::new(Session {
+            server_id: server_id.into(),
+            control: sender,
+            encoding: session_encoding,
+            buffer: Vec::new(),
+            start: 0,
+            ready: false,
+            closed: None,
+            subscribers: channel.into_iter().collect(),
+        })),
+    );
+    (session_id, receiver)
+}
+
+/// A shell on this computer (see `local_shell`).
+pub fn open_local(registry: &Arc<TerminalRegistry>) -> Result<String, String> {
+    let (session_id, receiver) = register(
+        registry,
+        local_shell::LOCAL_SERVER_ID,
+        encoding_rs::UTF_8,
+        None,
+    );
+    let thread_registry = registry.clone();
+    let thread_session_id = session_id.clone();
+    thread::spawn(move || {
+        let result = local_shell::run(thread_registry.clone(), thread_session_id.clone(), receiver);
+        let reason = result.err().unwrap_or_else(|| "终端已关闭".to_string());
+        thread_registry.mark_closed(&thread_session_id, reason);
+    });
+    Ok(session_id)
+}
+
+pub fn open_terminal(
+    app: AppHandle,
+    registry: &Arc<TerminalRegistry>,
+    server_id: String,
+    channel: Option<Channel>,
+) -> Result<String, String> {
+    if server_id == local_shell::LOCAL_SERVER_ID {
+        return open_local(registry);
+    }
+    let session_encoding = get_server(&app, &server_id)
+        .map(|server| encoding::lookup(&server.encoding))
+        .unwrap_or(encoding_rs::UTF_8);
+    let (session_id, receiver) = register(registry, &server_id, session_encoding, channel);
+
+    let thread_registry = registry.clone();
+    let thread_session_id = session_id.clone();
+    let thread_app = app.clone();
+    thread::spawn(move || {
+        let result = run_terminal_thread(
+            app,
+            thread_registry.clone(),
+            thread_session_id.clone(),
+            server_id.clone(),
+            receiver,
+        );
+        if result.is_err() && !thread_registry.was_ready(&thread_session_id) {
+            telemetry::record(&thread_app, EventKind::SshLogin, Some(&server_id), false);
+        }
+        let reason = result.err().unwrap_or_else(|| "终端已关闭".to_string());
+        thread_registry.mark_closed(&thread_session_id, reason);
+    });
+
+    Ok(session_id)
+}
+
+/// Subscribe `channel` to a session, first replaying its buffered output.
+/// Returns the encoding to decode the output with.
+pub fn attach_terminal(
+    registry: &TerminalRegistry,
+    session_id: &str,
+    channel: Channel,
+) -> Result<String, String> {
+    registry
+        .with_session(session_id, |session| {
+            session.replay(&channel)?;
+            if session.subscribers.len() >= MAX_SUBSCRIBERS {
+                session.subscribers.remove(0);
+            }
+            session.subscribers.push(channel);
+            Ok(session.encoding.name().to_string())
+        })
+        .unwrap_or_else(|| Err("找不到终端会话".to_string()))
+}
+
+/// Stop sending to the pane whose channel has this id.
+pub fn detach_terminal(registry: &TerminalRegistry, session_id: &str, channel_id: u32) {
+    registry.with_session(session_id, |session| {
+        session
+            .subscribers
+            .retain(|channel| channel.id() != channel_id)
+    });
+}
+
+/// Raw bytes for the remote side, sent as they are (file transfers, tests).
+pub fn terminal_input(
+    registry: &TerminalRegistry,
+    session_id: &str,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    registry.send(session_id, TerminalControl::Input(data))
+}
+
+/// Typed text, encoded with the session's encoding.
+pub fn terminal_type(
+    registry: &TerminalRegistry,
+    session_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let encoding = registry
+        .with_session(session_id, |session| session.encoding)
+        .ok_or_else(|| "找不到终端会话".to_string())?;
+    terminal_input(registry, session_id, encoding::encode(encoding, text))
+}
+
+/// Decode and encode a running session with another encoding. Returns the
+/// encoding's canonical name.
+pub fn set_encoding(
+    registry: &TerminalRegistry,
+    session_id: &str,
+    label: &str,
+) -> Result<String, String> {
+    let name = encoding::normalize(label)?;
+    registry
+        .with_session(session_id, |session| {
+            session.encoding = encoding::lookup(&name)
+        })
+        .ok_or_else(|| "找不到终端会话".to_string())?;
+    Ok(name)
+}
+
+pub fn terminal_resize(
+    registry: &TerminalRegistry,
+    session_id: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    registry.send(
+        session_id,
+        TerminalControl::Resize {
+            cols: cols.max(1),
+            rows: rows.max(1),
+        },
+    )
+}
+
+pub fn close_terminal(registry: &TerminalRegistry, session_id: &str) {
+    if let Some(session) = lock(&registry.sessions).remove(session_id) {
+        let _ = lock(&session).control.send(TerminalControl::Close);
     }
 }
 
 #[cfg(not(russh_backend))]
 const CONNECTED_MARKER: &str = "[iShell] connected";
 
-impl TerminalRegistry {
-    pub(crate) fn connected_to(&self, session_id: &str, server_id: &str) -> bool {
-        self.servers
-            .lock()
-            .is_ok_and(|servers| servers.get(session_id).is_some_and(|id| id == server_id))
-            && self
-                .sessions
-                .lock()
-                .is_ok_and(|sessions| sessions.contains_key(session_id))
-            && self
-                .ready_sessions
-                .lock()
-                .is_ok_and(|sessions| sessions.contains(session_id))
+/// Whether a character takes two terminal cells (CJK, Hangul, fullwidth
+/// forms, most emoji). Readline moves the cursor by cells, not characters.
+fn is_wide(ch: char) -> bool {
+    matches!(ch as u32,
+        0x1100..=0x115F | 0x2E80..=0x303E | 0x3041..=0x33FF | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF | 0xA000..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F | 0x1F900..=0x1FAFF | 0x20000..=0x3FFFD)
+}
+
+/// One line being drawn: cells hold a character, or `None` for the second
+/// half of a wide one.
+#[derive(Default)]
+struct LineDraw {
+    cells: Vec<Option<char>>,
+    cursor: usize,
+}
+
+impl LineDraw {
+    fn put(&mut self, ch: char) {
+        let width = if is_wide(ch) { 2 } else { 1 };
+        if self.cells.len() < self.cursor + width {
+            self.cells.resize(self.cursor + width, Some(' '));
+        }
+        self.cells[self.cursor] = Some(ch);
+        if width == 2 {
+            self.cells[self.cursor + 1] = None;
+        }
+        self.cursor += width;
     }
 
-    fn remove_session(&self, session_id: &str) {
-        if let Ok(mut servers) = self.servers.lock() {
-            servers.remove(session_id);
-        }
-        if let Ok(mut sessions) = self.sessions.lock() {
-            sessions.remove(session_id);
-        }
+    fn text(&self) -> String {
+        self.cells
+            .iter()
+            .flatten()
+            .collect::<String>()
+            .trim_end()
+            .to_string()
     }
 }
 
-pub fn open_terminal(
-    app: AppHandle,
-    registry: State<'_, Arc<TerminalRegistry>>,
-    id: String,
-) -> Result<String, String> {
-    let session_id = Uuid::new_v4().to_string();
-    let (sender, receiver) = mpsc::channel::<TerminalControl>();
-    registry
-        .servers
-        .lock()
-        .map_err(|_| "终端服务器表已锁定".to_string())?
-        .insert(session_id.clone(), id.clone());
-
-    registry
-        .sessions
-        .lock()
-        .map_err(|_| "终端会话表已锁定".to_string())?
-        .insert(session_id.clone(), sender);
-    registry
-        .output_buffers
-        .lock()
-        .map_err(|_| "终端输出缓冲已锁定".to_string())?
-        .insert(session_id.clone(), String::new());
-    registry
-        .output_starts
-        .lock()
-        .map_err(|_| "终端输出偏移已锁定".to_string())?
-        .insert(session_id.clone(), 0);
-    registry
-        .output_offsets
-        .lock()
-        .map_err(|_| "终端输出偏移已锁定".to_string())?
-        .insert(session_id.clone(), 0);
-    registry
-        .ready_sessions
-        .lock()
-        .map_err(|_| "终端就绪状态已锁定".to_string())?
-        .remove(&session_id);
-
-    let thread_app = app.clone();
-    let thread_session_id = session_id.clone();
-    let thread_registry = registry.inner().clone();
-    thread::spawn(move || {
-        let result = run_terminal_thread(
-            thread_app.clone(),
-            thread_registry.clone(),
-            thread_session_id.clone(),
-            id.clone(),
-            receiver,
-        );
-        if let Err(reason) = result {
-            if thread_registry
-                .ready_sessions
-                .lock()
-                .is_ok_and(|sessions| !sessions.contains(&thread_session_id))
-            {
-                telemetry::record(&thread_app, EventKind::SshLogin, Some(&id), false);
+/// Terminal output as the lines a reader would see. Carriage returns,
+/// backspaces and erase-in-line (`ESC [ K`) are applied, as a shell's line
+/// editor and progress bars use them; other escape sequences are dropped.
+fn plain_lines(output: &str, lines: usize) -> String {
+    let mut done: Vec<String> = Vec::new();
+    let mut line = LineDraw::default();
+    let mut chars = output.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\n' => done.push(std::mem::take(&mut line).text()),
+            '\r' => line.cursor = 0,
+            '\x08' => line.cursor = line.cursor.saturating_sub(1),
+            '\t' => {
+                let next = (line.cursor / 8 + 1) * 8;
+                while line.cursor < next {
+                    line.put(' ');
+                }
             }
-            let _ = thread_app.emit(
-                "terminal:closed",
-                TerminalClosedPayload {
-                    session_id: thread_session_id.clone(),
-                    reason,
-                },
-            );
-        }
-        thread_registry.remove_session(&thread_session_id);
-    });
-
-    Ok(session_id)
-}
-
-pub fn terminal_input(
-    registry: State<'_, Arc<TerminalRegistry>>,
-    session_id: String,
-    data: String,
-) -> Result<(), String> {
-    let sender = registry
-        .sessions
-        .lock()
-        .map_err(|_| "终端会话表已锁定".to_string())?
-        .get(&session_id)
-        .cloned()
-        .ok_or_else(|| "找不到终端会话".to_string())?;
-
-    sender.send(TerminalControl::Input(data)).map_err(|_| {
-        registry.inner().remove_session(&session_id);
-        "终端会话已关闭，请重新连接".to_string()
-    })
-}
-
-pub fn terminal_resize(
-    registry: State<'_, Arc<TerminalRegistry>>,
-    session_id: String,
-    cols: u16,
-    rows: u16,
-) -> Result<(), String> {
-    let sender = registry
-        .sessions
-        .lock()
-        .map_err(|_| "终端会话表已锁定".to_string())?
-        .get(&session_id)
-        .cloned()
-        .ok_or_else(|| "找不到终端会话".to_string())?;
-
-    sender
-        .send(TerminalControl::Resize {
-            cols: cols.max(1),
-            rows: rows.max(1),
-        })
-        .map_err(|_| {
-            registry.inner().remove_session(&session_id);
-            "终端会话已关闭，请重新连接".to_string()
-        })
-}
-
-pub fn close_terminal(
-    registry: State<'_, Arc<TerminalRegistry>>,
-    session_id: String,
-) -> Result<(), String> {
-    if let Ok(mut servers) = registry.servers.lock() {
-        servers.remove(&session_id);
-    }
-    if let Some(sender) = registry
-        .sessions
-        .lock()
-        .map_err(|_| "终端会话表已锁定".to_string())?
-        .remove(&session_id)
-    {
-        let _ = sender.send(TerminalControl::Close);
-    }
-    if let Ok(mut buffers) = registry.output_buffers.lock() {
-        buffers.remove(&session_id);
-    }
-    if let Ok(mut starts) = registry.output_starts.lock() {
-        starts.remove(&session_id);
-    }
-    if let Ok(mut offsets) = registry.output_offsets.lock() {
-        offsets.remove(&session_id);
-    }
-    if let Ok(mut ready_sessions) = registry.ready_sessions.lock() {
-        ready_sessions.remove(&session_id);
-    }
-
-    Ok(())
-}
-
-pub fn terminal_snapshot(
-    registry: State<'_, Arc<TerminalRegistry>>,
-    session_id: String,
-) -> Result<TerminalSnapshotPayload, String> {
-    terminal_snapshot_inner(registry.inner(), &session_id)
-}
-
-fn terminal_snapshot_inner(
-    registry: &TerminalRegistry,
-    session_id: &str,
-) -> Result<TerminalSnapshotPayload, String> {
-    let data = registry
-        .output_buffers
-        .lock()
-        .map_err(|_| "终端输出缓冲已锁定".to_string())?
-        .get(session_id)
-        .cloned()
-        .unwrap_or_default();
-    let start_offset = registry
-        .output_starts
-        .lock()
-        .map_err(|_| "终端输出偏移已锁定".to_string())?
-        .get(session_id)
-        .copied()
-        .unwrap_or_default();
-    let end_offset = start_offset + data.chars().count();
-    let ready = registry
-        .ready_sessions
-        .lock()
-        .map_err(|_| "终端就绪状态已锁定".to_string())?
-        .contains(session_id);
-
-    Ok(TerminalSnapshotPayload {
-        data,
-        start_offset,
-        end_offset,
-        ready,
-    })
-}
-
-fn emit_terminal_data(
-    app: &AppHandle,
-    registry: &TerminalRegistry,
-    session_id: &str,
-    data: String,
-) {
-    let offset = registry
-        .output_offsets
-        .lock()
-        .map(|mut offsets| {
-            let offset = offsets.entry(session_id.to_string()).or_default();
-            let current = *offset;
-            *offset += data.chars().count();
-            current
-        })
-        .unwrap_or_default();
-
-    if let Ok(mut buffers) = registry.output_buffers.lock() {
-        let buffer = buffers.entry(session_id.to_string()).or_default();
-        buffer.push_str(&data);
-        const MAX_BUFFER_BYTES: usize = 256 * 1024;
-        const TARGET_BUFFER_BYTES: usize = 192 * 1024;
-        if buffer.len() > MAX_BUFFER_BYTES {
-            // Trim in larger batches instead of shifting a nearly 256 KiB String
-            // on every small terminal chunk after the buffer reaches its cap.
-            let keep_from = buffer.len() - TARGET_BUFFER_BYTES;
-            let trim_from = buffer
-                .char_indices()
-                .find(|(index, _)| *index >= keep_from)
-                .map(|(index, _)| index)
-                .unwrap_or(keep_from);
-            let drained_chars = buffer[..trim_from].chars().count();
-            buffer.drain(..trim_from);
-            if let Ok(mut starts) = registry.output_starts.lock() {
-                *starts.entry(session_id.to_string()).or_default() += drained_chars;
-            }
+            '\x1b' => match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    let mut params = String::new();
+                    let mut last = '\0';
+                    for seq in chars.by_ref() {
+                        if ('@'..='~').contains(&seq) {
+                            last = seq;
+                            break;
+                        }
+                        params.push(seq);
+                    }
+                    if last == 'K' {
+                        match params.as_str() {
+                            "" | "0" => line.cells.truncate(line.cursor),
+                            "2" => line.cells.clear(),
+                            _ => {}
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(seq) = chars.next() {
+                        if seq == '\x07' {
+                            break;
+                        }
+                        if seq == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            ch if ch.is_control() => {}
+            ch => line.put(ch),
         }
     }
-
-    let _ = app.emit(
-        "terminal:data",
-        TerminalDataPayload {
-            session_id: session_id.to_string(),
-            offset,
-            data,
-        },
-    );
-}
-
-fn emit_terminal_ready(
-    app: &AppHandle,
-    registry: &TerminalRegistry,
-    session_id: &str,
-    server_id: &str,
-) {
-    telemetry::record(app, EventKind::SshLogin, Some(server_id), true);
-    if let Ok(mut ready_sessions) = registry.ready_sessions.lock() {
-        ready_sessions.insert(session_id.to_string());
+    done.push(line.text());
+    while done.last().is_some_and(|line| line.trim().is_empty()) {
+        done.pop();
     }
-    let _ = app.emit(
-        "terminal:ready",
-        TerminalReadyPayload {
-            session_id: session_id.to_string(),
-        },
-    );
+    let skip = done.len().saturating_sub(lines);
+    done[skip..].join("\n")
 }
 
 #[cfg(not(russh_backend))]
@@ -414,19 +523,13 @@ fn strip_ansi_sequences(value: &str) -> String {
     output
 }
 
+/// Keep the last `max_bytes` of `value`.
 #[cfg(not(russh_backend))]
-fn keep_recent_tail(value: &mut String, max_bytes: usize) {
-    if value.len() <= max_bytes {
-        return;
+fn keep_recent_tail(value: &mut Vec<u8>, max_bytes: usize) {
+    if value.len() > max_bytes {
+        let drop = value.len() - max_bytes;
+        value.drain(..drop);
     }
-
-    let keep_from = value.len() - max_bytes;
-    let drain_to = value
-        .char_indices()
-        .find(|(index, _)| *index >= keep_from)
-        .map(|(index, _)| index)
-        .unwrap_or(keep_from);
-    value.drain(..drain_to);
 }
 
 #[cfg(not(russh_backend))]
@@ -474,6 +577,10 @@ fn build_ssh_command(server: &ServerRecord, invocation: &openssh::SshInvocation)
         command.env(key, value);
     }
     command.arg("-tt");
+    // No escape character: `~.` after a newline would otherwise end the
+    // session, and file transfers (rz/sz) send arbitrary bytes.
+    command.arg("-e");
+    command.arg("none");
     for arg in &invocation.args {
         command.arg(arg);
     }
@@ -551,67 +658,62 @@ fn run_terminal_thread(
     let should_autofill_password = saved_secret.is_some() && hops.is_empty();
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
-        let mut decoder = Utf8StreamDecoder::default();
-        let mut output_tail = String::new();
-        let mut connection_tail = String::new();
+        // Recent bytes while connecting, read only to spot prompts and the
+        // login; what reaches the terminal is the raw output.
+        let mut connection_tail = Vec::new();
         let mut password_prompt_seen = false;
         let mut connected_seen = false;
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
-                    let tail = decoder.finish();
-                    if !tail.is_empty() {
-                        emit_terminal_data(&read_app, &read_registry, &read_session_id, tail);
-                    }
                     let _ = read_done_sender.send("远程终端已关闭".to_string());
                     break;
                 }
                 Ok(size) => {
-                    let data = decoder.push(&buffer[..size]);
-                    if data.is_empty() {
-                        continue;
-                    }
+                    let data = &buffer[..size];
                     if !connected_seen {
-                        connection_tail.push_str(&data);
+                        connection_tail.extend_from_slice(data);
                         keep_recent_tail(&mut connection_tail, 1024);
-                        if connection_tail.contains(CONNECTED_MARKER) {
-                            connected_seen = true;
-                            mark_connected(&read_app, &read_server_id).ok();
-                            emit_terminal_ready(
-                                &read_app,
-                                &read_registry,
-                                &read_session_id,
-                                &read_server_id,
-                            );
-                        } else if looks_like_shell_ready(&connection_tail) {
-                            connected_seen = true;
-                            mark_connected(&read_app, &read_server_id).ok();
-                            emit_terminal_ready(
-                                &read_app,
-                                &read_registry,
-                                &read_session_id,
-                                &read_server_id,
-                            );
-                            emit_terminal_data(
-                                &read_app,
-                                &read_registry,
-                                &read_session_id,
-                                "\r\n[iShell] connected via OpenSSH\r\n".into(),
-                            );
-                        }
-                    }
-                    // Only answer authentication prompts while the SSH session is
-                    // still connecting. Never inject a saved account password or
-                    // key passphrase into later remote prompts such as sudo.
-                    if should_autofill_password && !password_prompt_seen && !connected_seen {
-                        output_tail.push_str(&data);
-                        keep_recent_tail(&mut output_tail, 1024);
-                        if looks_like_password_prompt(&output_tail) {
+                        let tail = String::from_utf8_lossy(&connection_tail);
+                        // Only answer authentication prompts while the SSH
+                        // session is still connecting. Never inject a saved
+                        // password into later remote prompts such as sudo.
+                        if should_autofill_password
+                            && !password_prompt_seen
+                            && looks_like_password_prompt(&tail)
+                        {
                             password_prompt_seen = true;
                             let _ = password_prompt_sender.send(());
                         }
+                        if tail.contains(CONNECTED_MARKER) {
+                            connected_seen = true;
+                            mark_connected(&read_app, &read_server_id).ok();
+                            telemetry::record(
+                                &read_app,
+                                EventKind::SshLogin,
+                                Some(&read_server_id),
+                                true,
+                            );
+                            read_registry.mark_ready(&read_session_id);
+                        } else if looks_like_shell_ready(&tail) {
+                            connected_seen = true;
+                            mark_connected(&read_app, &read_server_id).ok();
+                            telemetry::record(
+                                &read_app,
+                                EventKind::SshLogin,
+                                Some(&read_server_id),
+                                true,
+                            );
+                            read_registry.mark_ready(&read_session_id);
+                            read_registry.output(&read_session_id, data);
+                            read_registry.output(
+                                &read_session_id,
+                                b"\r\n[iShell] connected via OpenSSH\r\n",
+                            );
+                            continue;
+                        }
                     }
-                    emit_terminal_data(&read_app, &read_registry, &read_session_id, data);
+                    read_registry.output(&read_session_id, data);
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(err) => {
@@ -622,12 +724,7 @@ fn run_terminal_thread(
         }
     });
 
-    emit_terminal_data(
-        &app,
-        &registry,
-        &session_id,
-        "\r\n[iShell] OpenSSH started\r\n".into(),
-    );
+    registry.output(&session_id, b"\r\n[iShell] OpenSSH started\r\n");
 
     loop {
         if password_prompt_receiver.try_recv().is_ok() {
@@ -652,7 +749,7 @@ fn run_terminal_thread(
 
         match receiver.recv_timeout(Duration::from_millis(80)) {
             Ok(TerminalControl::Input(data)) => {
-                if let Err(err) = writer.write_all(data.as_bytes()) {
+                if let Err(err) = writer.write_all(&data) {
                     invocation.cleanup();
                     return Err(format!("终端写入失败：{err}"));
                 }
@@ -669,19 +766,13 @@ fn run_terminal_thread(
                     return Err(format!("无法调整终端尺寸：{err}"));
                 }
             }
-            Ok(TerminalControl::Close) => {
+            Ok(TerminalControl::Close) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 invocation.cleanup();
                 return Ok(());
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                invocation.cleanup();
-                return Ok(());
-            }
         }
     }
 }
@@ -704,43 +795,20 @@ fn run_terminal_thread(
         .ok()
         .filter(|password| !password.is_empty());
 
-    emit_terminal_data(
-        &app,
-        &registry,
+    registry.output(
         &session_id,
-        "\r\n[iShell] 正在通过 russh 连接...\r\n".into(),
+        "\r\n[iShell] 正在通过 russh 连接...\r\n".as_bytes(),
     );
 
-    let ready_app = app.clone();
-    let ready_server_id = server_id.clone();
     let ready_registry = registry.clone();
     let ready_session_id = session_id.clone();
     let on_ready = move || {
-        mark_connected(&ready_app, &ready_server_id).ok();
-        emit_terminal_ready(
-            &ready_app,
-            &ready_registry,
-            &ready_session_id,
-            &ready_server_id,
-        );
-        emit_terminal_data(
-            &ready_app,
-            &ready_registry,
-            &ready_session_id,
-            "\r\n[iShell] connected via russh\r\n".into(),
-        );
+        mark_connected(&app, &server_id).ok();
+        telemetry::record(&app, EventKind::SshLogin, Some(&server_id), true);
+        ready_registry.mark_ready(&ready_session_id);
+        ready_registry.output(&ready_session_id, b"\r\n[iShell] connected via russh\r\n");
     };
-
-    let data_app = app.clone();
-    let data_registry = registry.clone();
-    let data_session_id = session_id.clone();
-    let mut decoder = Utf8StreamDecoder::default();
-    let on_data = move |data: &[u8]| {
-        let text = decoder.push(data);
-        if !text.is_empty() {
-            emit_terminal_data(&data_app, &data_registry, &data_session_id, text);
-        }
-    };
+    let on_data = move |data: &[u8]| registry.output(&session_id, data);
 
     crate::russh_transport::run_terminal(
         &server,
@@ -755,22 +823,188 @@ fn run_terminal_thread(
 
 #[cfg(test)]
 mod tests {
-    use super::Utf8StreamDecoder;
+    use super::*;
 
-    #[test]
-    fn decodes_multibyte_text_split_across_chunks() {
-        let mut decoder = Utf8StreamDecoder::default();
-        let bytes = "中文".as_bytes();
+    /// A channel that records the frames it is sent.
+    fn recording_channel() -> (Channel, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let sink = frames.clone();
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Raw(bytes) = body {
+                sink.lock().unwrap().push(bytes);
+            }
+            Ok(())
+        });
+        (channel, frames)
+    }
 
-        assert_eq!(decoder.push(&bytes[..2]), "");
-        assert_eq!(decoder.push(&bytes[2..4]), "中");
-        assert_eq!(decoder.push(&bytes[4..]), "文");
-        assert_eq!(decoder.finish(), "");
+    fn decode(frame: &[u8]) -> (u8, u64, &[u8]) {
+        (
+            frame[0],
+            u64::from_le_bytes(frame[1..9].try_into().unwrap()),
+            &frame[9..],
+        )
+    }
+
+    fn registry_with_session(subscriber: Channel) -> (Arc<TerminalRegistry>, String) {
+        let registry = Arc::new(TerminalRegistry::default());
+        let (control, _receiver) = mpsc::channel();
+        std::mem::forget(_receiver);
+        lock(&registry.sessions).insert(
+            "s".into(),
+            Arc::new(Mutex::new(Session {
+                server_id: "server".into(),
+                control,
+                encoding: encoding_rs::UTF_8,
+                buffer: Vec::new(),
+                start: 0,
+                ready: false,
+                closed: None,
+                subscribers: vec![subscriber],
+            })),
+        );
+        (registry, "s".into())
     }
 
     #[test]
-    fn replaces_invalid_utf8_without_losing_following_text() {
-        let mut decoder = Utf8StreamDecoder::default();
-        assert_eq!(decoder.push(&[0xff, b'o', b'k']), "\u{fffd}ok");
+    fn output_reaches_subscribers_as_raw_bytes_with_offsets() {
+        let (channel, frames) = recording_channel();
+        let (registry, id) = registry_with_session(channel);
+        // Split inside a multi-byte character, and not UTF-8 at all (GBK).
+        let text = "中文".as_bytes();
+        registry.output(&id, &text[..2]);
+        registry.output(&id, &text[2..]);
+        registry.output(&id, &[0xd6, 0xd0]);
+        registry.mark_ready(&id);
+        registry.mark_ready(&id);
+
+        let frames = frames.lock().unwrap();
+        let decoded: Vec<_> = frames.iter().map(|frame| decode(frame)).collect();
+        assert_eq!(decoded[0], (FRAME_DATA, 0, &text[..2]));
+        assert_eq!(decoded[1], (FRAME_DATA, 2, &text[2..]));
+        assert_eq!(decoded[2], (FRAME_DATA, 6, &[0xd6, 0xd0][..]));
+        assert_eq!(decoded[3], (FRAME_READY, 8, &[][..]));
+        assert_eq!(decoded.len(), 4, "ready is announced once");
+        assert!(registry.connected_to(&id, "server"));
+        assert!(!registry.connected_to(&id, "other"));
+    }
+
+    #[test]
+    fn attaching_replays_the_buffer_and_the_session_state() {
+        let (first, _) = recording_channel();
+        let (registry, id) = registry_with_session(first);
+        registry.output(&id, b"hello ");
+        registry.mark_ready(&id);
+        registry.output(&id, b"world");
+        registry.mark_closed(&id, "远程终端已关闭".into());
+        assert!(!registry.connected_to(&id, "server"));
+        assert!(terminal_input(&registry, &id, b"x".to_vec()).is_err());
+
+        let (late, frames) = recording_channel();
+        attach_terminal(&registry, &id, late).unwrap();
+        let frames = frames.lock().unwrap();
+        let decoded: Vec<_> = frames.iter().map(|frame| decode(frame)).collect();
+        assert_eq!(decoded[0], (FRAME_DATA, 0, &b"hello world"[..]));
+        assert_eq!(decoded[1], (FRAME_READY, 11, &[][..]));
+        assert_eq!(decoded[2], (FRAME_CLOSED, 11, "远程终端已关闭".as_bytes()));
+        assert!(attach_terminal(&registry, "missing", recording_channel().0).is_err());
+    }
+
+    #[test]
+    fn the_buffer_is_trimmed_and_offsets_keep_counting() {
+        let (channel, _) = recording_channel();
+        let (registry, id) = registry_with_session(channel);
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..10 {
+            registry.output(&id, &chunk);
+        }
+        let (start, len) = registry
+            .with_session(&id, |session| (session.start, session.buffer.len()))
+            .unwrap();
+        assert!(len <= MAX_BUFFER_BYTES);
+        assert_eq!(start + len as u64, 10 * 64 * 1024);
+        assert!(registry
+            .with_session(&id, |session| session.buffer.ends_with(b"xxx"))
+            .unwrap());
+
+        let (late, frames) = recording_channel();
+        attach_terminal(&registry, &id, late).unwrap();
+        assert_eq!(decode(&frames.lock().unwrap()[0]).1, start);
+    }
+
+    #[test]
+    fn a_session_switches_encoding_for_input_and_output() {
+        let registry = TerminalRegistry::default();
+        let (control, receiver) = mpsc::channel();
+        lock(&registry.sessions).insert(
+            "s".into(),
+            Arc::new(Mutex::new(Session {
+                server_id: "server".into(),
+                control,
+                encoding: encoding_rs::UTF_8,
+                buffer: Vec::new(),
+                start: 0,
+                ready: true,
+                closed: None,
+                subscribers: vec![],
+            })),
+        );
+        assert_eq!(set_encoding(&registry, "s", "gb2312").unwrap(), "GBK");
+        assert!(set_encoding(&registry, "s", "utf-16").is_err());
+        assert!(set_encoding(&registry, "missing", "gbk").is_err());
+
+        terminal_type(&registry, "s", "echo 中").unwrap();
+        match receiver.try_recv() {
+            Ok(TerminalControl::Input(bytes)) => assert_eq!(bytes, b"echo \xd6\xd0"),
+            _ => panic!("no input"),
+        }
+        registry.output("s", b"\xc4\xe3\xba\xc3\r\n");
+        assert_eq!(registry.recent_text("s", 5).unwrap(), "你好");
+    }
+
+    #[test]
+    fn recent_text_is_what_a_reader_sees() {
+        let (channel, _) = recording_channel();
+        let (registry, id) = registry_with_session(channel);
+        registry.output(&id, b"\x1b[1;32mok\x1b[0m line one\r\n");
+        registry.output(&id, b"progress 10%\rprogress 100%\r\n");
+        registry.output(
+            &id,
+            "\x1b]0;title\x07错误：端口被占用\r\n$ \r\n\r\n".as_bytes(),
+        );
+        assert_eq!(
+            registry.recent_text(&id, 10).unwrap(),
+            "ok line one\nprogress 100%\n错误：端口被占用\n$"
+        );
+        assert_eq!(registry.recent_text(&id, 2).unwrap(), "错误：端口被占用\n$");
+        assert!(registry.recent_text("missing", 2).is_none());
+
+        // What bash's line editor sends for Ctrl+U after typing, with a wide
+        // character counted as two cells.
+        assert_eq!(
+            plain_lines(
+                "$ # 看端口\x08\x08\x08\x08\x08\x08\x08\x08\x1b[Kss -lt\r\n",
+                5
+            ),
+            "$ ss -lt"
+        );
+        assert_eq!(plain_lines("abc\x08X\n\tz", 5), "abX\n        z");
+        assert_eq!(plain_lines("keep\x1b[2K\rnew", 5), "new");
+    }
+
+    #[test]
+    fn detached_panes_stop_receiving() {
+        let (first, first_frames) = recording_channel();
+        let first_id = first.id();
+        let (registry, id) = registry_with_session(first);
+        let (second, second_frames) = recording_channel();
+        attach_terminal(&registry, &id, second).unwrap();
+        detach_terminal(&registry, &id, first_id);
+        registry.output(&id, b"after");
+        assert!(first_frames.lock().unwrap().is_empty());
+        assert_eq!(second_frames.lock().unwrap().len(), 1);
+
+        close_terminal(&registry, &id);
+        assert!(registry.session(&id).is_none());
     }
 }
