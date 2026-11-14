@@ -237,6 +237,8 @@ npm run tauri -- dev
 <details>
 <summary>展开版本记录</summary>
 
+- `v1.7.3` 新增远程终端截图粘贴：在本地截图复制到剪贴板后，使用 ⌘V（macOS）、Ctrl+V / Win+V（Windows）或 Ctrl+Shift+V（Linux），自动将截图以 PNG 上传到当前 SSH 服务器，并把远程图片路径填入 Claude Code、Codex 等 CLI 的输入框，由你按回车发送。图片最大 20 MiB，仅填入当前窗格，不参与广播；加入断线重连保护、上传失败清理和旧截图清理，普通文字及认证阶段的密码、验证码仍可照常粘贴。
+
 - `v1.7.2` 改善 Windows 浅色主题下终端文字发虚的问题，并新增终端字体设置：新增"文字渲染"选项，让终端使用不透明背景以启用 ClearType（Windows 和 macOS 上所有主题默认开启）；设置 → 终端中可以选择推荐的清晰字体或自定义字体，调整字重，并实时预览。
 - `v1.7.1` 修复 macOS 上终端连接后立即关闭并提示 `unix_listener: ... too long for Unix domain socket` 的问题：系统临时目录太长时，连接复用的 socket 改放到较短的目录。
 

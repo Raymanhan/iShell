@@ -238,6 +238,8 @@ The Chinese [project analysis and promotion notes](docs/PROJECT_ANALYSIS.zh-CN.m
 <details>
 <summary>Expand release history</summary>
 
+- `v1.7.3` adds screenshot paste in remote terminals: copy a local screenshot and press ⌘V (macOS), Ctrl+V / Win+V (Windows), or Ctrl+Shift+V (Linux) to upload a PNG to the connected SSH server and insert its remote path into a CLI such as Claude Code or Codex. You press Enter to send it. Images are limited to 20 MiB and stay in the initiating pane without broadcast. Reconnect protection, failed-upload cleanup and old screenshot cleanup are included; ordinary text and authentication passwords or codes still paste as text.
+
 - `v1.7.2` makes terminal text sharper on light themes on Windows and adds terminal font settings: a new text rendering option draws the terminal on a solid background so ClearType applies (on by default on Windows and macOS for every theme), and Settings > Terminal now offers suggested screen fonts, a custom font, a font weight and a live preview.
 - `v1.7.1` fixes macOS terminals that closed right after connecting with `unix_listener: ... too long for Unix domain socket`: the shared-connection socket now goes in a short folder when the system temporary folder is too long for it.
 
