@@ -525,6 +525,67 @@ fn terminal_session(app: &AppHandle, id: &str) {
     });
     assert!(registry.connected_to(&session, id));
 
+    // Native screenshot clipboard -> live SSH upload -> lossless PNG. The
+    // command must only read/upload, never submit anything to the terminal.
+    let mut clipboard = arboard::Clipboard::new().unwrap();
+    let pixels = vec![255, 0, 0, 255, 0, 128, 255, 100];
+    clipboard
+        .set_image(arboard::ImageData {
+            width: 2,
+            height: 1,
+            bytes: std::borrow::Cow::Borrowed(&pixels),
+        })
+        .unwrap();
+    assert!(crate::clipboard::paste_clipboard(app, &registry, "wrong-server", &session).is_err());
+    let crate::clipboard::ClipboardPaste::Image(path) =
+        crate::clipboard::paste_clipboard(app, &registry, id, &session).unwrap()
+    else {
+        panic!("a screenshot must upload as an image");
+    };
+    let png = transport::exec(
+        app,
+        id,
+        &format!("cat {}", crate::openssh::shell_quote(&path)),
+        None,
+    )
+    .unwrap();
+    let mut reader = png::Decoder::new(std::io::Cursor::new(png))
+        .read_info()
+        .unwrap();
+    let mut decoded = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut decoded).unwrap();
+    assert_eq!((info.width, info.height), (2, 1));
+    assert_eq!(&decoded[..info.buffer_size()], pixels);
+    assert_eq!(
+        shell(
+            app,
+            id,
+            &format!("stat -c %a {}", crate::openssh::shell_quote(&path))
+        )
+        .trim(),
+        "600"
+    );
+    shell(
+        app,
+        id,
+        &format!(
+            "rm -f {file}; rmdir {dir}",
+            file = crate::openssh::shell_quote(&path),
+            dir = crate::openssh::shell_quote(path.strip_suffix("/screenshot.png").unwrap()),
+        ),
+    );
+    // Text paste must work during authentication, without a ready session.
+    clipboard
+        .set_text("clipboard authentication code".to_string())
+        .unwrap();
+    let crate::clipboard::ClipboardPaste::Text(text) =
+        crate::clipboard::paste_clipboard(app, &registry, id, "not-ready").unwrap()
+    else {
+        panic!("ordinary clipboard text must stay text");
+    };
+    assert_eq!(text, "clipboard authentication code");
+    drop(clipboard);
+
     // Bytes that are not UTF-8 ("中文" in GBK) must arrive untouched.
     terminal::terminal_input(
         &registry,

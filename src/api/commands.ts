@@ -8,6 +8,7 @@
  * Argument names are the Rust parameter names in camelCase.
  */
 import type { Channel } from "@tauri-apps/api/core";
+import type { ClipboardPaste } from "../features/shell/clipboard";
 import type {
   AiConfig,
   AiConfigInput,
@@ -189,6 +190,7 @@ export interface CommandMap {
   attach_terminal: { args: { sessionId: string; onOutput: Channel<ArrayBuffer> }; result: string };
   detach_terminal: { args: { sessionId: string; channelId: number }; result: void };
   terminal_input: { args: { sessionId: string; data: string }; result: void };
+  terminal_paste_clipboard: { args: { id: string; sessionId: string }; result: ClipboardPaste };
   terminal_resize: { args: { sessionId: string; cols: number; rows: number }; result: void };
   /** Returns the encoding's canonical name. */
   terminal_set_encoding: { args: { sessionId: string; encoding: string }; result: string };

@@ -10,6 +10,8 @@ import { getTerminalSurfaceReport, getTerminalTheme, getThemeDefinition, type Ap
 import { boldWeightFor, type TerminalFontWeight } from "../features/settings/terminalFonts";
 import { splitShortcutDirection, type PaneRect, type SplitDirection } from "../features/shell/panes";
 import { directoryLinkProvider } from "../features/shell/directoryLinks";
+import { createClipboardPasteHandler, imagePasteData, isTerminalPasteShortcut } from "../features/shell/clipboard";
+import { isLocalServerId } from "../features/shell/local";
 import {
   cleanSuggestedCommand,
   isAskAiShortcut,
@@ -599,7 +601,55 @@ function TerminalPaneBase({
     terminal.writeln(`iShell · ${tab.title}`);
     terminal.writeln("");
 
+    let disposed = false;
+    const pasteClipboard = createClipboardPasteHandler({
+      getSession: () => {
+        const sessionId = sessionRef.current;
+        return sessionId && closedSessionRef.current !== sessionId
+          ? { sessionId, serverId: tab.serverId }
+          : null;
+      },
+      isDisposed: () => disposed,
+      readClipboard: ({ sessionId, serverId }) => {
+        if (zmodemsRef.current[sessionId]?.active) {
+          return Promise.reject(new Error(t("文件传输期间无法粘贴，请等待传输完成")));
+        }
+        return command("terminal_paste_clipboard", { sessionId, id: serverId });
+      },
+      pasteText: (text) => {
+        if (sessionRef.current && zmodemsRef.current[sessionRef.current]?.active) {
+          throw new Error(t("文件传输期间无法粘贴，请等待传输完成"));
+        }
+        closeHistorySuggest();
+        terminal.paste(text);
+      },
+      pasteImage: (path) => {
+        if (sessionRef.current && zmodemsRef.current[sessionRef.current]?.active) {
+          throw new Error(t("截图已上传，文件传输期间无法填入路径：{0}", path));
+        }
+        closeHistorySuggest();
+        // A remote path is only valid on this host. Bypass broadcast input.
+        rawSendTerminalInput(imagePasteData(path, terminal.modes.bracketedPasteMode), false);
+      },
+      setNotice,
+    });
+    // Covers native menu/context-menu paste as well as keyboard shortcuts.
+    // Capture before xterm's text-only paste handler to prevent double pastes.
+    const container = containerRef.current;
+    const onPaste = (event: ClipboardEvent) => {
+      if (!isTauri || isLocalServerId(tab.serverId)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void pasteClipboard();
+    };
+    container.addEventListener("paste", onPaste, true);
+
     terminal.attachCustomKeyEventHandler((event) => {
+      if (isTauri && !isLocalServerId(tab.serverId) && isTerminalPasteShortcut(event, isWindowsPlatform)) {
+        event.preventDefault();
+        void pasteClipboard();
+        return false;
+      }
       const splitDirection = splitShortcutDirection(event);
       if (splitDirection && onSplitRef.current) {
         onSplitRef.current(splitDirection);
@@ -682,7 +732,6 @@ function TerminalPaneBase({
 
     terminal.onData((data) => sendTerminalInput(data));
 
-    let disposed = false;
     let fitFrame = 0;
     let settledFrame = 0;
     const fitWhenVisible = () => {
@@ -750,6 +799,7 @@ function TerminalPaneBase({
 
     return () => {
       disposed = true;
+      container.removeEventListener("paste", onPaste, true);
       requestFitRef.current = null;
       cancelAnimationFrame(fitFrame);
       cancelAnimationFrame(settledFrame);

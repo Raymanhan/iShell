@@ -24,6 +24,7 @@ use crate::{
 };
 
 mod archive;
+mod clipboard;
 mod download;
 mod monitor;
 mod remote;
@@ -34,6 +35,7 @@ mod upload;
 mod upload_scripts;
 
 use archive::*;
+pub use clipboard::*;
 pub use download::*;
 pub(crate) use download::{local_download_name, unique_file_path};
 pub use monitor::*;

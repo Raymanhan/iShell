@@ -1,4 +1,5 @@
 mod ai;
+mod clipboard;
 mod commands;
 mod encoding;
 mod error;
@@ -112,6 +113,7 @@ pub fn run() {
             commands::attach_terminal,
             commands::detach_terminal,
             commands::terminal_input,
+            commands::terminal_paste_clipboard,
             commands::terminal_resize,
             commands::terminal_set_encoding,
             commands::terminal_write,
