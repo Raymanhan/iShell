@@ -1,31 +1,41 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { Channel } from "@tauri-apps/api/core";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Terminal } from "@xterm/xterm";
 import { RefreshCw, X } from "lucide-react";
-import { command, isTauri } from "../api/tauri";
-import { getTerminalSurfaceReport, getTerminalTheme, type AppTheme } from "../constants/theme";
+import { command, isTauri, saveReceivedFile, writeTerminalBytes as sendRawBytes } from "../api/tauri";
+import { ZmodemController, type LocalFile } from "../features/shell/zmodem";
+import { getTerminalSurfaceReport, getTerminalTheme, getThemeDefinition, type AppTheme } from "../constants/theme";
+import { boldWeightFor, type TerminalFontWeight } from "../features/settings/terminalFonts";
 import { splitShortcutDirection, type PaneRect, type SplitDirection } from "../features/shell/panes";
 import { directoryLinkProvider } from "../features/shell/directoryLinks";
-import { createClipboardPasteHandler, imagePasteData, isTerminalPasteShortcut, type ClipboardPaste } from "../features/shell/clipboard";
+import { createClipboardPasteHandler, imagePasteData, isTerminalPasteShortcut } from "../features/shell/clipboard";
+import { isLocalServerId } from "../features/shell/local";
+import {
+  cleanSuggestedCommand,
+  isAskAiShortcut,
+  isGenerateCommandShortcut,
+  naturalLanguageRequest,
+  requestFromPromptLine,
+} from "../features/shell/aiAssist";
+import { enableUnicode11, enableWebglRenderer } from "../features/shell/renderer";
 import type { ShellTab } from "../features/shell/types";
 import { isTerminalSearchShortcut, TerminalSearchBar } from "./TerminalSearchBar";
-import type {
-  TerminalClosedPayload,
-  TerminalDataPayload,
-  TerminalReadyPayload,
-  TerminalSnapshotPayload,
-} from "../types";
+import {
+  FRAME_CLOSED,
+  FRAME_DATA,
+  FRAME_READY,
+  parseFrame,
+  TerminalOutput,
+} from "../features/shell/terminalStream";
 
 import { t, translateMessage } from "../i18n";
 import { useLocale } from "../i18n/useLocale";
 const passwordPromptPattern = /(?:password|passphrase|密码|口令)[^:\n\r]*[:：]\s*$/i;
 const platformSource = `${navigator.userAgent} ${navigator.platform}`.toLowerCase();
 const isWindowsPlatform = platformSource.includes("win");
-const terminalFontFamily = platformSource.includes("win")
-  ? '"Cascadia Mono", "Cascadia Code", Consolas, "Microsoft YaHei Mono", "Microsoft YaHei", monospace'
-  : '"SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace';
+const isMacPlatform = platformSource.includes("mac");
 const HISTORY_SUGGESTION_LIMIT = 8;
 
 interface HistorySuggestState {
@@ -57,6 +67,10 @@ function TerminalPaneBase({
   visible,
   theme,
   fontSize,
+  fontFamily,
+  fontWeight,
+  opaqueBackground,
+  gpuRendering = true,
   layoutSignal,
   setNotice,
   onReady,
@@ -64,6 +78,8 @@ function TerminalPaneBase({
   onReconnect,
   onCommandSubmitted,
   onOpenDirectory,
+  onAskAi,
+  onSuggestCommand,
   pasteRequest,
   commandRequest,
   commandHistory,
@@ -79,6 +95,16 @@ function TerminalPaneBase({
   visible: boolean;
   theme: AppTheme;
   fontSize: number;
+  /** CSS font-family, with fallbacks. */
+  fontFamily: string;
+  fontWeight: TerminalFontWeight;
+  /**
+   * Draw on the theme's solid surface instead of a transparent background,
+   * which lets glyphs use subpixel (ClearType) antialiasing.
+   */
+  opaqueBackground: boolean;
+  /** Draw with WebGL; read when the terminal is created. */
+  gpuRendering?: boolean;
   layoutSignal: string;
   setNotice: (notice: string) => void;
   onReady?: () => void;
@@ -86,9 +112,13 @@ function TerminalPaneBase({
   onReconnect?: () => void;
   onCommandSubmitted?: (command: string) => void;
   onOpenDirectory?: (path: string) => void;
+  /** ⌘⇧A / Ctrl+Shift+A with output selected: ask the AI about it. */
+  onAskAi?: (selection: string) => void;
+  /** ⌘↩ / Ctrl+Enter on a `# …` line: a command for the description. */
+  onSuggestCommand?: (request: string) => Promise<string>;
   pasteRequest?: { id: number; command: string } | null;
   commandRequest?: { id: number; command: string; requirePromptStart?: boolean; blockedNotice?: string } | null;
-  commandHistory: string[];
+  commandHistory: readonly string[];
   pane?: PanePlacement;
   onFocusPane?: () => void;
   onClosePane?: () => void;
@@ -108,7 +138,14 @@ function TerminalPaneBase({
   const sessionRef = useRef<string | null>(tab.sessionId);
   const closedSessionRef = useRef<string | null>(null);
   const readySessionRef = useRef<string | null>(null);
-  const renderedOffsetRef = useRef<Record<string, number>>({});
+  // Decoded output per session; survives re-attaching, so nothing repeats.
+  const outputsRef = useRef<Record<string, TerminalOutput>>({});
+  // ZMODEM (rz/sz) per session, fed once the session's replayed output has
+  // been shown, so a transfer in old output is not started again.
+  const zmodemsRef = useRef<Record<string, ZmodemController>>({});
+  const liveSessionsRef = useRef(new Set<string>());
+  const encodingRef = useRef(tab.encoding ?? "UTF-8");
+  encodingRef.current = tab.encoding ?? "UTF-8";
   const connectingNoticeRef = useRef(false);
   const fitTimerRef = useRef<number | null>(null);
   const fitSettledTimerRef = useRef<number | null>(null);
@@ -117,6 +154,11 @@ function TerminalPaneBase({
   const onClosedRef = useRef(onClosed);
   const onCommandSubmittedRef = useRef(onCommandSubmitted);
   const onOpenDirectoryRef = useRef(onOpenDirectory);
+  const onAskAiRef = useRef(onAskAi);
+  onAskAiRef.current = onAskAi;
+  const onSuggestCommandRef = useRef(onSuggestCommand);
+  onSuggestCommandRef.current = onSuggestCommand;
+  const suggestingRef = useRef(false);
   onOpenDirectoryRef.current = onOpenDirectory;
   const onSplitRef = useRef(onSplit);
   onSplitRef.current = onSplit;
@@ -161,22 +203,73 @@ function TerminalPaneBase({
     onReadyRef.current?.();
   }
 
-  function writeTerminalData(sessionId: string, offset: number, data: string) {
-    const renderedOffset = renderedOffsetRef.current[sessionId] ?? 0;
-    const dataLength = Array.from(data).length;
-    const eventEnd = offset + dataLength;
-    if (eventEnd <= renderedOffset) return;
+  function writeTerminalBytes(sessionId: string, offset: number, bytes: Uint8Array) {
+    const output = (outputsRef.current[sessionId] ??= new TerminalOutput(encodingRef.current));
+    const fresh = output.take(offset, bytes);
+    if (!fresh.length) return;
+    if (liveSessionsRef.current.has(sessionId)) zmodemFor(sessionId).consume(fresh);
+    else showOutput(sessionId, fresh);
+  }
 
-    const overlap = Math.max(0, renderedOffset - offset);
-    const nextData = overlap > 0 ? Array.from(data).slice(overlap).join("") : data;
-    terminalRef.current?.write(nextData);
-    renderedOffsetRef.current[sessionId] = eventEnd;
-    trackSensitivePrompt(nextData);
-    // Scan the full payload, not just the part actually written: if an earlier
-    // chunk carrying the marker was dropped (e.g. a `terminal:ready`/`terminal:data`
-    // listener race on fast/reused sessions), the snapshot catch-up still delivers
-    // the whole buffer here and `overlap` trims it out of `nextData` before we can see it.
-    if (data.includes("[iShell] connected")) markReady(sessionId);
+  /** Decode and show ordinary output. */
+  function showOutput(sessionId: string, bytes: Uint8Array) {
+    const text = outputsRef.current[sessionId]?.decode(bytes);
+    if (!text) return;
+    terminalRef.current?.write(text);
+    trackSensitivePrompt(text);
+  }
+
+  function zmodemFor(sessionId: string): ZmodemController {
+    let picked: string[] = [];
+    return (zmodemsRef.current[sessionId] ??= new ZmodemController({
+      write: (bytes) => sendRawBytes(sessionId, bytes),
+      output: (bytes) => showOutput(sessionId, bytes),
+      status: (text) => terminalRef.current?.write(`\r\n${text}`),
+      pickFiles: async () => {
+        const files = await command("zmodem_pick_files");
+        picked = files.map((file) => file.id);
+        return files.map(
+          (file): LocalFile => ({
+            name: file.name,
+            size: file.size,
+            mtime: file.mtime,
+            read: async (offset, length) =>
+              new Uint8Array(await command("zmodem_read_file", { id: file.id, offset, length })),
+          }),
+        );
+      },
+      saveFile: (name, chunks) => saveReceivedFile(name, chunks),
+      onActiveChange: (active) => {
+        if (active) {
+          terminalRef.current?.write(`\r\n[iShell] ${t("ZMODEM 传输开始，按 Ctrl+C 取消")}`);
+          return;
+        }
+        terminalRef.current?.write("\r\n");
+        if (picked.length) void command("zmodem_forget_files", { ids: picked }).catch(() => undefined);
+        picked = [];
+      },
+    }));
+  }
+
+  /** Decode the session's further output with `encoding`. */
+  function switchDecoder(sessionId: string, encoding: string) {
+    const output = outputsRef.current[sessionId];
+    if (!output) return;
+    const rest = output.setEncoding(encoding);
+    if (rest) terminalRef.current?.write(rest);
+  }
+
+  useEffect(() => {
+    if (tab.sessionId) switchDecoder(tab.sessionId, tab.encoding ?? "UTF-8");
+  }, [tab.encoding, tab.sessionId]);
+
+  function showClosed(sessionId: string, reason: string) {
+    if (closedSessionRef.current === sessionId) return;
+    closedSessionRef.current = sessionId;
+    if (terminalRef.current) terminalRef.current.options.disableStdin = true;
+    terminalRef.current?.writeln(`\r\n[iShell] ${reason}`);
+    setNotice(reason);
+    onClosedRef.current?.(reason);
   }
 
   function reportTerminalSize() {
@@ -373,6 +466,38 @@ function TerminalPaneBase({
     return true;
   }
 
+  /** The `# …` description on the cursor's line, if that is what it holds. */
+  function currentAiRequest(): string | null {
+    const buffer = terminalRef.current?.buffer.active;
+    const line = buffer?.getLine(buffer.baseY + buffer.cursorY)?.translateToString(true) ?? "";
+    return requestFromPromptLine(line) ?? naturalLanguageRequest(commandDraftRef.current);
+  }
+
+  /** Replace the `# …` line with a command for it, without running it. */
+  async function suggestCommand(request: string) {
+    const suggest = onSuggestCommandRef.current;
+    const sessionId = sessionRef.current;
+    if (!suggest) return;
+    suggestingRef.current = true;
+    setNotice(t("AI 正在生成命令…"));
+    try {
+      const commandText = cleanSuggestedCommand(await suggest(request));
+      // The user may have switched sessions or typed on meanwhile.
+      if (sessionRef.current !== sessionId || currentAiRequest() !== request) return;
+      if (!commandText) {
+        setNotice(t("AI 没有给出命令"));
+        return;
+      }
+      // Ctrl+U clears the line; the command is typed but not submitted.
+      rawSendTerminalInput(`\x15${commandText}`, false);
+      setNotice(commandText.startsWith("#") ? t("AI 未给出可执行命令，说明已放在命令行") : t("命令已填入，确认后按回车执行"));
+    } catch (error) {
+      setNotice(t("生成命令失败：{0}", String(error)));
+    } finally {
+      suggestingRef.current = false;
+    }
+  }
+
   function sendTerminalInput(data: string) {
     if (handleHistorySuggestInput(data)) return;
     rawSendTerminalInput(data);
@@ -386,6 +511,12 @@ function TerminalPaneBase({
   function rawSendTerminalInput(data: string, broadcast = true) {
     const currentSession = sessionRef.current;
     if (currentSession && closedSessionRef.current === currentSession) return;
+    // While a file transfer runs the line carries ZMODEM, not keystrokes.
+    const transfer = currentSession ? zmodemsRef.current[currentSession] : undefined;
+    if (transfer?.active) {
+      if (data.includes("\x03")) transfer.abort();
+      return;
+    }
     if (broadcast && broadcastingRef.current) onBroadcastInputRef.current?.(tab.id, data);
     updateCommandDraft(data);
     if (isTauri && currentSession) {
@@ -421,22 +552,26 @@ function TerminalPaneBase({
     const fit = new FitAddon();
     const terminal = new Terminal({
       cursorBlink: true,
-      fontFamily: terminalFontFamily,
+      fontFamily,
       fontSize,
+      fontWeight,
+      fontWeightBold: boldWeightFor(fontWeight),
       lineHeight: 1.35,
       scrollback: 8000,
       // Required for the glass theme: without this xterm paints an opaque
       // background (ignoring the #00000000 theme color) and covers the macOS
       // vibrancy across the whole terminal region.
-      allowTransparency: true,
+      // An opaque background (opaqueBackground) turns this off for ClearType.
+      allowTransparency: !opaqueBackground,
       // Search highlights use the decorations API.
       allowProposedApi: true,
-      theme: getTerminalTheme(theme),
+      theme: getTerminalTheme(theme, opaqueBackground),
     });
 
     const search = new SearchAddon();
     terminal.loadAddon(fit);
     terminal.loadAddon(search);
+    enableUnicode11(terminal);
     // The theme background is transparent, so xterm would answer a background
     // query (OSC 11 "?") with black and CLIs that adapt to it (Codex, Claude
     // Code, vim) would pick dark styling on light themes, e.g. dark ink on a
@@ -454,6 +589,9 @@ function TerminalPaneBase({
       return true;
     });
     terminal.open(containerRef.current);
+    const releaseWebgl = gpuRendering
+      ? enableWebglRenderer(terminal, (reason) => console.warn(`[iShell] ${reason}`))
+      : undefined;
     terminal.registerLinkProvider(directoryLinkProvider(
       terminal,
       (path) => onOpenDirectoryRef.current?.(path),
@@ -472,14 +610,23 @@ function TerminalPaneBase({
           : null;
       },
       isDisposed: () => disposed,
-      readClipboard: ({ sessionId, serverId }) => command<ClipboardPaste>("terminal_paste_clipboard", {
-        sessionId, id: serverId,
-      }),
+      readClipboard: ({ sessionId, serverId }) => {
+        if (zmodemsRef.current[sessionId]?.active) {
+          return Promise.reject(new Error(t("文件传输期间无法粘贴，请等待传输完成")));
+        }
+        return command("terminal_paste_clipboard", { sessionId, id: serverId });
+      },
       pasteText: (text) => {
+        if (sessionRef.current && zmodemsRef.current[sessionRef.current]?.active) {
+          throw new Error(t("文件传输期间无法粘贴，请等待传输完成"));
+        }
         closeHistorySuggest();
         terminal.paste(text);
       },
       pasteImage: (path) => {
+        if (sessionRef.current && zmodemsRef.current[sessionRef.current]?.active) {
+          throw new Error(t("截图已上传，文件传输期间无法填入路径：{0}", path));
+        }
         closeHistorySuggest();
         // A remote path is only valid on this host. Bypass broadcast input.
         rawSendTerminalInput(imagePasteData(path, terminal.modes.bracketedPasteMode), false);
@@ -490,7 +637,7 @@ function TerminalPaneBase({
     // Capture before xterm's text-only paste handler to prevent double pastes.
     const container = containerRef.current;
     const onPaste = (event: ClipboardEvent) => {
-      if (!isTauri) return;
+      if (!isTauri || isLocalServerId(tab.serverId)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       void pasteClipboard();
@@ -498,7 +645,7 @@ function TerminalPaneBase({
     container.addEventListener("paste", onPaste, true);
 
     terminal.attachCustomKeyEventHandler((event) => {
-      if (isTauri && isTerminalPasteShortcut(event, isWindowsPlatform)) {
+      if (isTauri && !isLocalServerId(tab.serverId) && isTerminalPasteShortcut(event, isWindowsPlatform)) {
         event.preventDefault();
         void pasteClipboard();
         return false;
@@ -508,6 +655,24 @@ function TerminalPaneBase({
         onSplitRef.current(splitDirection);
         event.preventDefault();
         return false;
+      }
+
+      if (isAskAiShortcut(event, isMacPlatform) && onAskAiRef.current) {
+        const selection = terminal.getSelection();
+        if (selection.trim()) {
+          onAskAiRef.current(selection);
+          event.preventDefault();
+          return false;
+        }
+      }
+
+      if (isGenerateCommandShortcut(event, isMacPlatform) && onSuggestCommandRef.current) {
+        const request = currentAiRequest();
+        if (request) {
+          event.preventDefault();
+          if (!suggestingRef.current) void suggestCommand(request);
+          return false;
+        }
       }
 
       if (isTerminalSearchShortcut(event)) {
@@ -648,6 +813,7 @@ function TerminalPaneBase({
       if (fitSettledTimerRef.current !== null) window.clearTimeout(fitSettledTimerRef.current);
       observer.disconnect();
       setSearchAddon(null);
+      releaseWebgl?.();
       terminal.dispose();
     };
   }, [setNotice, tab.title]);
@@ -685,86 +851,51 @@ function TerminalPaneBase({
   useEffect(() => {
     themeRef.current = theme;
     if (!terminalRef.current) return;
-    terminalRef.current.options.theme = getTerminalTheme(theme);
+    terminalRef.current.options.allowTransparency = !opaqueBackground;
+    terminalRef.current.options.theme = getTerminalTheme(theme, opaqueBackground);
     requestFitRef.current?.();
-  }, [theme]);
+  }, [theme, opaqueBackground]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
-    terminalRef.current.options.fontSize = fontSize;
+    const options = terminalRef.current.options;
+    options.fontSize = fontSize;
+    options.fontFamily = fontFamily;
+    options.fontWeight = fontWeight;
+    options.fontWeightBold = boldWeightFor(fontWeight);
     requestFitRef.current?.();
-  }, [fontSize]);
+  }, [fontSize, fontFamily, fontWeight]);
 
-  useEffect(() => {
-    if (!isTauri) return;
-    // `listen` resolves asynchronously. Under StrictMode the effect can be
-    // torn down before the promise settles; guard with a cancelled flag so a
-    // late-arriving listener is removed immediately, otherwise duplicate
-    // listeners write every byte of output twice.
-    let cancelled = false;
-    let unlistenData: (() => void) | undefined;
-    let unlistenReady: (() => void) | undefined;
-    let unlistenClosed: (() => void) | undefined;
-
-    listen<TerminalDataPayload>("terminal:data", (event) => {
-      if (event.payload.sessionId === sessionRef.current) {
-        writeTerminalData(event.payload.sessionId, event.payload.offset, event.payload.data);
-      }
-    }).then((unlisten) => {
-      if (cancelled) unlisten();
-      else unlistenData = unlisten;
-    });
-
-    listen<TerminalReadyPayload>("terminal:ready", (event) => {
-      if (event.payload.sessionId === sessionRef.current) {
-        markReady(event.payload.sessionId);
-      }
-    }).then((unlisten) => {
-      if (cancelled) unlisten();
-      else unlistenReady = unlisten;
-    });
-
-    listen<TerminalClosedPayload>("terminal:closed", (event) => {
-      if (event.payload.sessionId === sessionRef.current) {
-        closedSessionRef.current = event.payload.sessionId;
-        if (terminalRef.current) terminalRef.current.options.disableStdin = true;
-        const reason = translateMessage(event.payload.reason);
-        terminalRef.current?.writeln(`\r\n[iShell] ${reason}`);
-        setNotice(reason);
-        onClosedRef.current?.(reason);
-      }
-    }).then((unlisten) => {
-      if (cancelled) unlisten();
-      else unlistenClosed = unlisten;
-    });
-
-    return () => {
-      cancelled = true;
-      unlistenData?.();
-      unlistenReady?.();
-      unlistenClosed?.();
-    };
-  }, [setNotice]);
-
+  // Each pane subscribes to its session with a channel of its own. Attaching
+  // replays the session's buffered output and subscribes in one step, so
+  // nothing falls in between; output already shown is skipped by offset.
   useEffect(() => {
     if (!isTauri || !tab.sessionId) return;
     const sessionId = tab.sessionId;
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      const renderedOffset = renderedOffsetRef.current[sessionId] ?? 0;
-      command<TerminalSnapshotPayload>("terminal_snapshot", { sessionId })
-        .then((snapshot) => {
-          if (cancelled || sessionRef.current !== sessionId) return;
-          if (snapshot.ready) markReady(sessionId);
-          if (!snapshot.data) return;
-          if ((renderedOffsetRef.current[sessionId] ?? 0) > renderedOffset) return;
-          writeTerminalData(sessionId, snapshot.startOffset, snapshot.data);
-        })
-        .catch((error) => setNotice(String(error)));
-    }, 120);
+    let active = true;
+    const channel = new Channel<ArrayBuffer>();
+    channel.onmessage = (buffer) => {
+      if (!active || sessionRef.current !== sessionId) return;
+      const frame = parseFrame(buffer);
+      if (!frame) return;
+      if (frame.kind === FRAME_DATA) writeTerminalBytes(sessionId, frame.offset, frame.payload);
+      else if (frame.kind === FRAME_READY) markReady(sessionId);
+      else if (frame.kind === FRAME_CLOSED)
+        showClosed(sessionId, translateMessage(new TextDecoder().decode(frame.payload)));
+    };
+    command("attach_terminal", { sessionId, onOutput: channel })
+      .then((encoding) => {
+        if (!active) return;
+        switchDecoder(sessionId, encoding);
+        liveSessionsRef.current.add(sessionId);
+      })
+      .catch((error) => {
+        if (active) setNotice(String(error));
+      });
     return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
+      active = false;
+      liveSessionsRef.current.delete(sessionId);
+      void command("detach_terminal", { sessionId, channelId: channel.id }).catch(() => undefined);
     };
   }, [setNotice, tab.sessionId]);
 
@@ -819,7 +950,10 @@ function TerminalPaneBase({
       onPointerDownCapture={pane && !pane.focused ? onFocusPane : undefined}
       onFocusCapture={pane && !pane.focused ? onFocusPane : undefined}
     >
-      <div className="terminal-frame">
+      <div
+        className="terminal-frame"
+        style={opaqueBackground ? { background: getThemeDefinition(theme).terminalSurface } : undefined}
+      >
         <div className="terminal-host" ref={containerRef} />
         {searchSignal > 0 && searchAddon && (
           <TerminalSearchBar
@@ -906,6 +1040,9 @@ export const TerminalPane = memo(TerminalPaneBase, (previous, next) => {
     previous.visible === next.visible &&
     previous.theme === next.theme &&
     previous.fontSize === next.fontSize &&
+    previous.fontFamily === next.fontFamily &&
+    previous.fontWeight === next.fontWeight &&
+    previous.opaqueBackground === next.opaqueBackground &&
     previous.layoutSignal === next.layoutSignal &&
     previous.pasteRequest?.id === next.pasteRequest?.id &&
     previous.commandRequest?.id === next.commandRequest?.id &&

@@ -1,6 +1,13 @@
+/** Which API the model service speaks. */
+export type AiProvider = "openai" | "anthropic";
+export const AI_PROVIDER_DEFAULT_URLS: Record<AiProvider, string> = {
+  openai: "https://api.openai.com/v1",
+  anthropic: "https://api.anthropic.com",
+};
 import { msg, t } from "../../i18n";
 
 export interface AiConfig {
+  provider: AiProvider;
   baseUrl: string;
   models: string[];
   manualModels: string[];
@@ -11,6 +18,7 @@ export interface AiConfig {
   defaultPermission: AiPermission;
 }
 export interface AiConfigInput {
+  provider: AiProvider;
   baseUrl: string;
   models: string[];
   manualModels: string[];
@@ -127,6 +135,8 @@ export function modelSelection(
   };
 }
 export interface ToolResult {
+  /** One per server, when the call ran on several. */
+  results?: (ToolResult & { server: string })[];
   status?: string;
   stdout?: string;
   stderr?: string;
@@ -146,6 +156,8 @@ export interface AiEntry {
   running?: boolean;
   risk?: AiRisk;
   approvalId?: string;
+  /** The servers a tool call runs on, when the task spans several. */
+  servers?: string[];
   approvalPending?: boolean;
   approvalBusy?: boolean;
   approvalError?: string;
@@ -169,6 +181,8 @@ export interface AiConversation {
   requestId: string | null;
   stopping: boolean;
   sessionId: string | null;
+  /** Other servers this conversation may operate on, by server id. */
+  targets?: string[];
 }
 export interface AiEvent {
   type:
@@ -190,10 +204,12 @@ export interface AiEvent {
   result?: ToolResult;
   risk?: AiRisk;
   approvalId?: string;
+  servers?: string[];
   beforeTokens?: number;
   afterTokens?: number;
 }
 export const defaultAiConfig: AiConfig = {
+  provider: "openai",
   baseUrl: "https://api.openai.com/v1",
   models: [],
   manualModels: [],
@@ -271,6 +287,7 @@ export function applyAiEvent(
         ? {
             ...entry,
             risk: event.risk,
+            ...(event.servers?.length ? { servers: event.servers } : {}),
             ...(event.type === "approval"
               ? {
                   approvalId: event.approvalId,
@@ -365,6 +382,50 @@ export function serverHistory(
 }
 
 /** Restoring history never resumes a tool or reuses an old approval. */
+/** A saved conversation as the history list shows it, without its body. */
+export interface AiHistorySummary {
+  id: string;
+  serverId: string;
+  title: string;
+  messageCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface AiHistoryItem extends AiHistorySummary {
+  running: boolean;
+}
+
+/**
+ * The history list for a server: saved summaries, with conversations that are
+ * open in memory taking precedence because they may have changed since.
+ */
+export function historyItems(
+  summaries: Record<string, AiHistorySummary>,
+  conversations: Record<string, AiConversation>,
+  serverId: string,
+): AiHistoryItem[] {
+  const items = new Map<string, AiHistoryItem>();
+  for (const summary of Object.values(summaries))
+    if (summary.serverId === serverId)
+      items.set(summary.id, { ...summary, running: false });
+  for (const value of serverHistory(conversations, serverId))
+    items.set(value.id, {
+      id: value.id,
+      serverId,
+      title: conversationTitle(value),
+      messageCount: value.entries.filter((entry) => entry.kind === "user").length,
+      createdAt: value.createdAt,
+      updatedAt: value.updatedAt,
+      running: Boolean(value.requestId),
+    });
+  return [...items.values()].sort(
+    (a, b) =>
+      b.updatedAt - a.updatedAt ||
+      b.createdAt - a.createdAt ||
+      a.id.localeCompare(b.id),
+  );
+}
+
 export function restoreConversation(saved: AiConversation): AiConversation {
   const interrupted = Boolean(saved.requestId);
   return {
@@ -392,6 +453,29 @@ export function restoreConversation(saved: AiConversation): AiConversation {
         : []),
     ],
   };
+}
+
+/**
+ * The other servers a send can include: each needs a connected terminal,
+ * which the task runs its tools through. Servers without one are listed in
+ * `missing` and left out of this send.
+ */
+export function resolveTargets(
+  targets: readonly string[] | undefined,
+  primaryServerId: string,
+  tabs: readonly { serverId: string; sessionId: string | null; state: string }[],
+): { sessions: { serverId: string; sessionId: string }[]; missing: string[] } {
+  const sessions: { serverId: string; sessionId: string }[] = [];
+  const missing: string[] = [];
+  for (const serverId of new Set(targets ?? [])) {
+    if (serverId === primaryServerId) continue;
+    const tab = tabs.find(
+      (item) => item.serverId === serverId && item.state === "connected" && item.sessionId,
+    );
+    if (tab?.sessionId) sessions.push({ serverId, sessionId: tab.sessionId });
+    else missing.push(serverId);
+  }
+  return { sessions, missing };
 }
 
 /**

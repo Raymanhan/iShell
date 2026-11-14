@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import type { ConnectionImportPayload } from "../../api/commands";
 import { command, isTauri, rawMessage } from "../../api/tauri";
 import type { ConnectionMoveRequest } from "../../components/ConnectionManager";
 import type { ServerForm } from "../../components/ServerEditor";
 import { swatches } from "../../constants/theme";
 import { demoServers } from "../../mocks/demoData";
-import type { ServerInput, ServerRecord } from "../../types";
+import type { ServerRecord } from "../../types";
 import {
   canMoveConnectionNode,
   defaultForm,
@@ -23,10 +24,6 @@ import {
 import { formatBeijingCalendarDate, t } from "../../i18n";
 const CONNECTION_FOLDERS_KEY = "ishell.connectionFolders";
 
-interface ConnectionImportPayload {
-  folders: string[];
-  servers: Array<ServerInput & { password?: string | null }>;
-}
 
 export interface ConnectionTestFeedback {
   kind: "info" | "success" | "error";
@@ -88,7 +85,7 @@ export function useConnections({
       return;
     }
     try {
-      const next = await command<ServerRecord[]>("list_servers");
+      const next = await command("list_servers");
       setServers(next);
       setSelectedServerId((current) => current ?? next[0]?.id ?? null);
     } catch (error) {
@@ -121,6 +118,7 @@ export function useConnections({
       color: server.color || swatches[0],
       notes: server.notes,
       jumpServerId: server.jumpServerId ?? null,
+      encoding: server.encoding ?? "UTF-8",
       password: "",
     });
     setEditing(true);
@@ -142,6 +140,7 @@ export function useConnections({
       color: server.color || swatches[0],
       notes: server.notes,
       jumpServerId: server.jumpServerId ?? null,
+      encoding: server.encoding ?? "UTF-8",
       password: "",
     });
     setEditing(true);
@@ -280,13 +279,13 @@ export function useConnections({
     try {
       let imported: ConnectionImportPayload;
       try {
-        imported = await command<ConnectionImportPayload>("import_connections", { path, passphrase: null });
+        imported = await command("import_connections", { path, passphrase: null });
       } catch (error) {
         const raw = rawMessage(error);
         if (!raw.includes("加密密码") && !raw.includes("导入密钥")) throw error;
         const passphrase = window.prompt(t("导入文件包含加密密码，请输入导入密钥"))?.trim();
         if (!passphrase) return;
-        imported = await command<ConnectionImportPayload>("import_connections", { path, passphrase });
+        imported = await command("import_connections", { path, passphrase });
       }
       for (const input of imported.servers) {
         const { password, ...serverInput } = input;
@@ -353,6 +352,7 @@ export function useConnections({
         const saved: ServerRecord = {
           ...input,
           id: input.id || crypto.randomUUID(),
+          encoding: input.encoding ?? "UTF-8",
           sortOrder: servers.length,
           createdAt: Date.now() / 1000,
           updatedAt: Date.now() / 1000,
@@ -365,7 +365,7 @@ export function useConnections({
         );
         setSelectedServerId(saved.id);
       } else {
-        const saved = await command<ServerRecord>("save_server", {
+        const saved = await command("save_server", {
           input,
           password: form.password || null,
         });

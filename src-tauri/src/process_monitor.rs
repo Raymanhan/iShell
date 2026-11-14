@@ -1,3 +1,8 @@
+//! Live host monitoring. While at least one tab watches a server, two
+//! long-lived remote commands run on its connection: `top` for the process
+//! ranking and a loop printing status, network and disk metrics once a second.
+//! Each sample is emitted as an event keyed by the server id.
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -10,9 +15,26 @@ use std::{
 
 use tauri::{AppHandle, Emitter};
 
-use crate::{models::ProcessSamplePayload, ssh, time::now_fractional};
+use serde::Serialize;
+
+use crate::{
+    models::{NetworkSample, ProcessSamplePayload, ServerStatus},
+    ssh,
+    time::now_fractional,
+};
 
 const PROCESS_SAMPLE_EVENT: &str = "server-process-sample";
+const STATUS_SAMPLE_EVENT: &str = "server-status-sample";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusSamplePayload {
+    id: String,
+    status: ServerStatus,
+    network: NetworkSample,
+    /// Whether `status` carries a fresh disk reading.
+    has_disk: bool,
+}
 
 struct MonitorEntry {
     consumers: HashSet<String>,
@@ -56,6 +78,9 @@ impl ProcessMonitorRegistry {
             cancel
         };
 
+        let (metrics_app, metrics_id, metrics_cancel) =
+            (app.clone(), server_id.clone(), cancel.clone());
+        thread::spawn(move || run_metrics(metrics_app, metrics_id, metrics_cancel));
         let registry = self.clone();
         thread::spawn(move || {
             run_monitor(app, server_id.clone(), cancel.clone());
@@ -117,6 +142,39 @@ fn run_monitor(app: AppHandle, server_id: String, cancel: Arc<AtomicBool>) {
         }
         if let Err(error) = result {
             eprintln!("iShell process monitor for {server_id} stopped: {error}");
+        }
+        if sleep_until_cancelled(&cancel, Duration::from_secs(retry_seconds)) {
+            break;
+        }
+        retry_seconds = (retry_seconds * 2).min(8);
+    }
+}
+
+fn run_metrics(app: AppHandle, server_id: String, cancel: Arc<AtomicBool>) {
+    let mut retry_seconds = 1_u64;
+    while !cancel.load(Ordering::Relaxed) {
+        let result = ssh::stream_metrics(
+            &app,
+            &server_id,
+            || cancel.load(Ordering::Relaxed),
+            |sample| {
+                retry_seconds = 1;
+                let _ = app.emit(
+                    STATUS_SAMPLE_EVENT,
+                    StatusSamplePayload {
+                        id: server_id.clone(),
+                        status: sample.status,
+                        network: sample.network,
+                        has_disk: sample.has_disk,
+                    },
+                );
+            },
+        );
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        if let Err(error) = result {
+            eprintln!("iShell metrics monitor for {server_id} stopped: {error}");
         }
         if sleep_until_cancelled(&cancel, Duration::from_secs(retry_seconds)) {
             break;

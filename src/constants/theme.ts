@@ -412,8 +412,14 @@ export function getThemeDefinition(theme: AppTheme) {
   return appThemeDefinitions[theme];
 }
 
-export function getTerminalTheme(theme: AppTheme): ITheme {
+/**
+ * The terminal palette. With `opaque`, the background is the theme's solid
+ * surface color: xterm can then draw glyphs with subpixel (ClearType)
+ * antialiasing, which it cannot do on a transparent background.
+ */
+export function getTerminalTheme(theme: AppTheme, opaque = false): ITheme {
   const definition = getThemeDefinition(theme);
+  if (opaque) return { ...definition.terminal, background: definition.terminalSurface };
   // The background stays fully transparent for the glass effect, but xterm
   // blends selection and match highlights onto its RGB. Give it the surface's
   // RGB so those blends come out light on light themes instead of near-black.

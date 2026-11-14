@@ -1,5 +1,6 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { CornerDownLeft, Pencil, Plus, Search, SquareCode, Trash2, Type } from "lucide-react";
+import { fillSnippet, snippetVariables } from "../features/snippets/variables";
 import type { Snippet, SnippetInput } from "../types";
 
 import { t } from "../i18n";
@@ -10,6 +11,7 @@ export function SnippetsPanel({
   snippets,
   broadcasting,
   onSend,
+  fillRequest,
   onSave,
   onDelete,
 }: {
@@ -17,6 +19,8 @@ export function SnippetsPanel({
   /** Broadcast input is on, so a sent snippet reaches every broadcast session. */
   broadcasting: boolean;
   onSend: (snippet: Snippet) => void;
+  /** Ask for this snippet's variables (from the command palette); `id` changes per request. */
+  fillRequest?: { snippetId: string; id: number } | null;
   onSave: (input: SnippetInput) => Promise<unknown>;
   onDelete: (snippet: Snippet) => void;
 }) {
@@ -24,6 +28,43 @@ export function SnippetsPanel({
   const [draft, setDraft] = useState<SnippetInput | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A snippet with `{{variables}}` waiting for its values before it is sent.
+  const [filling, setFilling] = useState<{
+    snippet: Snippet;
+    values: Record<string, string>;
+    error: string | null;
+  } | null>(null);
+
+  function send(snippet: Snippet) {
+    const variables = snippetVariables(snippet.command);
+    if (!variables.length) {
+      onSend(snippet);
+      return;
+    }
+    setFilling({
+      snippet,
+      values: Object.fromEntries(variables.map((variable) => [variable.name, variable.defaultValue])),
+      error: null,
+    });
+  }
+
+  useEffect(() => {
+    const snippet = fillRequest && snippets.find((item) => item.id === fillRequest.snippetId);
+    if (snippet) send(snippet);
+    // Only a new request opens the form, not changes to the list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fillRequest?.id]);
+
+  function sendFilled(event: FormEvent) {
+    event.preventDefault();
+    if (!filling) return;
+    try {
+      onSend({ ...filling.snippet, command: fillSnippet(filling.snippet.command, filling.values) });
+      setFilling(null);
+    } catch (fillError) {
+      setFilling({ ...filling, error: fillError instanceof Error ? fillError.message : String(fillError) });
+    }
+  }
 
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -99,7 +140,7 @@ export function SnippetsPanel({
           />
           <textarea
             value={draft.command}
-            placeholder={t("命令，可多行\n例如：sudo systemctl restart nginx")}
+            placeholder={t("命令，可多行；{{名称}} 或 {{名称:默认值}} 为发送时填写的变量\n例如：sudo systemctl restart {{服务:nginx}}")}
             aria-label={t("命令")}
             rows={4}
             spellCheck={false}
@@ -133,6 +174,44 @@ export function SnippetsPanel({
         </form>
       )}
 
+      {filling && (
+        <form className="snippet-editor snippet-fill" onSubmit={sendFilled}>
+          <strong>{filling.snippet.name}</strong>
+          {Object.entries(filling.values).map(([name, value], index) => (
+            <label key={name}>
+              <span>{name}</span>
+              <input
+                value={value}
+                autoFocus={index === 0}
+                spellCheck={false}
+                aria-label={t("变量 {0}", name)}
+                onChange={(event) =>
+                  setFilling({ ...filling, error: null, values: { ...filling.values, [name]: event.target.value } })
+                }
+              />
+            </label>
+          ))}
+          <code className="snippet-preview">
+            {(() => {
+              try {
+                return fillSnippet(filling.snippet.command, filling.values);
+              } catch {
+                return filling.snippet.command;
+              }
+            })()}
+          </code>
+          {filling.error && <div className="snippet-error">{filling.error}</div>}
+          <div className="snippet-editor-actions">
+            <button type="button" className="btn-ghost" onClick={() => setFilling(null)}>
+              {t("取消")}
+            </button>
+            <button type="submit" className="solid-button">
+              {filling.snippet.run ? t("发送并执行") : t("发送")}
+            </button>
+          </div>
+        </form>
+      )}
+
       <div className="history-list snippets-list">
         {filtered.length > 0 ? (
           filtered.map((snippet) => (
@@ -140,7 +219,7 @@ export function SnippetsPanel({
               <button
                 type="button"
                 className="snippet-send"
-                onClick={() => onSend(snippet)}
+                onClick={() => send(snippet)}
                 title={snippet.run ? t("发送并执行") : t("发送到终端（不执行）")}
               >
                 <span className="snippet-name">

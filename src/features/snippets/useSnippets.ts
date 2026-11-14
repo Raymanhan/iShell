@@ -54,7 +54,7 @@ export function useSnippets(showNotice: (message: string) => void) {
       setSnippets(readDemoSnippets());
       return;
     }
-    command<Snippet[]>("list_snippets")
+    command("list_snippets")
       .then(setSnippets)
       .catch((error) => showNotice(String(error)));
   }, [showNotice]);
@@ -81,7 +81,7 @@ export function useSnippets(showNotice: (message: string) => void) {
       setSnippets(next);
       return saved;
     }
-    const saved = await command<Snippet>("save_snippet", { input });
+    const saved = await command("save_snippet", { input });
     setSnippets((current) =>
       current.some((item) => item.id === saved.id)
         ? current.map((item) => (item.id === saved.id ? saved : item))

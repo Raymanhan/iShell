@@ -20,9 +20,15 @@ pub struct Model {
     /// automatic compaction threshold. Absent in settings saved by older versions.
     #[serde(default)]
     pub context_window: Option<u64>,
+    /// Whether the model takes adaptive thinking (Anthropic); unknown elsewhere.
+    #[serde(default)]
+    pub adaptive_thinking: Option<bool>,
+    /// The model's output cap, where the service reports it.
+    #[serde(default)]
+    pub max_output_tokens: Option<u64>,
 }
 
-fn context_window(value: &Value) -> Option<u64> {
+pub(crate) fn context_window(value: &Value) -> Option<u64> {
     [
         "/context_window",
         "/context_length",
@@ -142,6 +148,8 @@ pub fn model(value: &Value) -> Option<Model> {
         name,
         reasoning_efforts,
         default_reasoning_effort,
+        adaptive_thinking: None,
+        max_output_tokens: None,
         context_window: context_window(value),
     })
 }

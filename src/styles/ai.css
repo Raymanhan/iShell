@@ -95,6 +95,56 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.ai-targets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin: 0 13px;
+  padding: 7px 0 8px;
+  border-bottom: 1px solid var(--hairline);
+  color: var(--dim);
+  font-size: 10.5px;
+}
+.ai-target-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px 2px 7px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  color: var(--text);
+}
+.ai-target-chip.offline {
+  color: var(--faint);
+  border-style: dashed;
+}
+.ai-target-chip button {
+  display: inline-flex;
+  padding: 1px;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+}
+.ai-target-chip button:hover:not(:disabled) {
+  color: var(--text);
+}
+.ai-targets select {
+  max-width: 100%;
+  padding: 2px 6px;
+  border: 1px dashed var(--hairline);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+}
+.ai-tool-server + .ai-tool-server {
+  border-top: 1px solid var(--hairline);
+}
+.ai-tool-server.failed .ai-tool-path {
+  color: var(--bad);
+}
 .ai-messages {
   flex: 1 1 0;
   min-height: 0;

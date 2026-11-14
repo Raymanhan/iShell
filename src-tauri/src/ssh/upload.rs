@@ -154,7 +154,7 @@ pub(super) fn transactional_folder_upload_command_with_script(
     format!("sh -c {}", openssh::shell_quote(&python_command))
 }
 
-pub(super) fn humanize_upload_error_message(message: &str) -> String {
+pub(crate) fn humanize_upload_error_message(message: &str) -> String {
     message
         .lines()
         .filter_map(|line| {
@@ -257,6 +257,16 @@ pub fn upload_file(
     transfer_id: &str,
     is_canceled: &dyn Fn() -> bool,
 ) -> Result<String, String> {
+    if sftp_transfer::use_sftp_transfers(app, id) {
+        return sftp_transfer::upload_file(
+            app,
+            id,
+            local_path,
+            remote_dir,
+            transfer_id,
+            is_canceled,
+        );
+    }
     let file_name = Path::new(local_path)
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -272,98 +282,36 @@ pub fn upload_file(
         .metadata()
         .map_err(|err| format!("无法读取本地文件信息：{err}"))?
         .len();
-    #[cfg(not(russh_backend))]
-    {
-        let mut retries = 0;
-        loop {
-            let temp_path = remote_upload_temp_path(remote_dir);
-            let remote_command = transactional_upload_command(&remote_path, &temp_path, total);
-            let result = openssh_upload_attempt(
-                app,
-                id,
-                &remote_command,
-                &mut local,
-                total,
-                transfer_id,
-                is_canceled,
-                true,
-            );
-            match result {
-                Ok(()) => break,
-                Err(UploadAttemptError::Canceled) => {
-                    let _ = remove_remote_file(app, id, &temp_path);
-                    return Err("上传已停止".to_string());
-                }
-                Err(err) if should_retry_upload(&err, retries, is_canceled()) => {
-                    let _ = remove_remote_file(app, id, &temp_path);
-                    retries += 1;
-                    if let Err(seek_err) = local.seek(SeekFrom::Start(0)) {
-                        return Err(format!("无法重试上传：{seek_err}"));
-                    }
-                }
-                Err(UploadAttemptError::Failed { message, .. }) => {
-                    let _ = remove_remote_file(app, id, &temp_path);
-                    return Err(message);
+    let mut retries = 0;
+    loop {
+        let temp_path = remote_upload_temp_path(remote_dir);
+        let remote_command = transactional_upload_command(&remote_path, &temp_path, total);
+        let result = transport::upload_attempt(
+            app,
+            id,
+            &remote_command,
+            &mut local,
+            total,
+            transfer_id,
+            is_canceled,
+            true,
+        );
+        match result {
+            Ok(()) => break,
+            Err(UploadAttemptError::Canceled) => {
+                let _ = remove_remote_file(app, id, &temp_path);
+                return Err("上传已停止".to_string());
+            }
+            Err(err) if should_retry_upload(&err, retries, is_canceled()) => {
+                let _ = remove_remote_file(app, id, &temp_path);
+                retries += 1;
+                if let Err(seek_err) = local.seek(SeekFrom::Start(0)) {
+                    return Err(format!("无法重试上传：{seek_err}"));
                 }
             }
-        }
-    }
-
-    #[cfg(russh_backend)]
-    {
-        let server = get_server(app, id)?;
-        let secret = read_secret(app, id).ok().filter(|value| !value.is_empty());
-        let mut retries = 0;
-        loop {
-            emit_progress(app, "sftp-upload-progress", transfer_id, 0, total, false);
-            let mut last_emit = Instant::now();
-            let mut on_progress = |transferred: u64| {
-                if transferred >= total || last_emit.elapsed() >= Duration::from_millis(80) {
-                    emit_progress(
-                        app,
-                        "sftp-upload-progress",
-                        transfer_id,
-                        transferred,
-                        total,
-                        false,
-                    );
-                    last_emit = Instant::now();
-                }
-            };
-            let temp_path = remote_upload_temp_path(remote_dir);
-            let remote_command = transactional_upload_command(&remote_path, &temp_path, total);
-            let result = crate::russh_transport::upload(
-                &server,
-                secret.as_deref(),
-                &remote_command,
-                &mut local,
-                false,
-                is_canceled,
-                &mut on_progress,
-            );
-            match result {
-                Ok(()) => break,
-                Err(crate::russh_transport::UploadError::Canceled) => {
-                    let _ = remove_remote_file(app, id, &temp_path);
-                    return Err("上传已停止".to_string());
-                }
-                Err(crate::russh_transport::UploadError::Failed { message, retryable }) => {
-                    let err = UploadAttemptError::Failed {
-                        message: format!("上传失败：{}", humanize_upload_error_message(&message)),
-                        retryable,
-                    };
-                    if should_retry_upload(&err, retries, is_canceled()) {
-                        let _ = remove_remote_file(app, id, &temp_path);
-                        retries += 1;
-                        if let Err(seek_err) = local.seek(SeekFrom::Start(0)) {
-                            return Err(format!("无法重试上传：{seek_err}"));
-                        }
-                        continue;
-                    }
-                    let _ = remove_remote_file(app, id, &temp_path);
-                    let UploadAttemptError::Failed { message, .. } = err;
-                    return Err(message);
-                }
+            Err(UploadAttemptError::Failed { message, .. }) => {
+                let _ = remove_remote_file(app, id, &temp_path);
+                return Err(message);
             }
         }
     }
@@ -406,6 +354,17 @@ pub fn upload_folder(
     replace_existing_folder: bool,
     is_canceled: &dyn Fn() -> bool,
 ) -> Result<String, String> {
+    if sftp_transfer::use_sftp_transfers(app, id) {
+        return sftp_transfer::upload_folder(
+            app,
+            id,
+            local_path,
+            remote_dir,
+            transfer_id,
+            replace_existing_folder,
+            is_canceled,
+        );
+    }
     let local_root = Path::new(local_path);
     let folder_name = local_root
         .file_name()
@@ -458,177 +417,67 @@ pub fn upload_folder(
     let mut archive = prepare_folder_archive(local_root, transfer_id, is_canceled)?;
     let total = archive.size;
 
-    #[cfg(not(russh_backend))]
-    {
-        let mut retries = 0;
-        loop {
-            let (archive_path, staging_path) = remote_folder_upload_paths(remote_dir);
-            let remote_command = transactional_folder_upload_command(
-                remote_dir,
-                &folder_name,
-                &archive_path,
-                &staging_path,
-                total,
-                archive.root_mode,
-                replace_existing_folder,
-                &expected_destination_revision,
-                &expected_destination_stable,
-            );
-            let result = openssh_upload_attempt(
+    let mut retries = 0;
+    loop {
+        let (archive_path, staging_path) = remote_folder_upload_paths(remote_dir);
+        let remote_command = transactional_folder_upload_command(
+            remote_dir,
+            &folder_name,
+            &archive_path,
+            &staging_path,
+            total,
+            archive.root_mode,
+            replace_existing_folder,
+            &expected_destination_revision,
+            &expected_destination_stable,
+        );
+        // While an existing folder is being replaced, a cancel that arrives
+        // after the archive was sent must not interrupt the remote commit.
+        let result = transport::upload_attempt(
+            app,
+            id,
+            &remote_command,
+            archive.file_mut(),
+            total,
+            transfer_id,
+            is_canceled,
+            !replace_existing_folder,
+        );
+        let clean_up = || {
+            remove_remote_folder_upload_artifacts(
                 app,
                 id,
-                &remote_command,
-                archive.file_mut(),
-                total,
-                transfer_id,
-                is_canceled,
-                !replace_existing_folder,
-            );
-            match result {
-                Ok(()) => break,
-                Err(UploadAttemptError::Canceled) => {
-                    remove_remote_folder_upload_artifacts(
-                        app,
-                        id,
-                        &archive_path,
-                        &staging_path,
-                        replace_existing_folder,
-                    );
-                    return Err("上传已停止".to_string());
-                }
-                Err(error)
-                    if !replace_existing_folder
-                        && should_retry_upload(&error, retries, is_canceled()) =>
-                {
-                    remove_remote_folder_upload_artifacts(
-                        app,
-                        id,
-                        &archive_path,
-                        &staging_path,
-                        replace_existing_folder,
-                    );
-                    retries += 1;
-                    archive
-                        .file_mut()
-                        .seek(SeekFrom::Start(0))
-                        .map_err(|err| format!("无法重试文件夹上传：{err}"))?;
-                }
-                Err(UploadAttemptError::Failed { message, .. }) => {
-                    remove_remote_folder_upload_artifacts(
-                        app,
-                        id,
-                        &archive_path,
-                        &staging_path,
-                        replace_existing_folder,
-                    );
-                    return Err(message);
-                }
-            }
-        }
-    }
-
-    #[cfg(russh_backend)]
-    {
-        let server = get_server(app, id)?;
-        let secret = read_secret(app, id).ok().filter(|value| !value.is_empty());
-        let mut retries = 0;
-        loop {
-            emit_progress(app, "sftp-upload-progress", transfer_id, 0, total, false);
-            let mut last_emit = Instant::now();
-            let mut on_progress = |transferred: u64| {
-                if transferred >= total || last_emit.elapsed() >= Duration::from_millis(80) {
-                    emit_progress(
-                        app,
-                        "sftp-upload-progress",
-                        transfer_id,
-                        transferred,
-                        total,
-                        false,
-                    );
-                    last_emit = Instant::now();
-                }
-            };
-            let (archive_path, staging_path) = remote_folder_upload_paths(remote_dir);
-            let remote_command = transactional_folder_upload_command(
-                remote_dir,
-                &folder_name,
                 &archive_path,
                 &staging_path,
-                total,
-                archive.root_mode,
                 replace_existing_folder,
-                &expected_destination_revision,
-                &expected_destination_stable,
-            );
-            let result = crate::russh_transport::upload(
-                &server,
-                secret.as_deref(),
-                &remote_command,
-                archive.file_mut(),
-                replace_existing_folder,
-                is_canceled,
-                &mut on_progress,
-            );
-            match result {
-                Ok(()) => break,
-                Err(crate::russh_transport::UploadError::Canceled) => {
-                    remove_remote_folder_upload_artifacts(
-                        app,
-                        id,
-                        &archive_path,
-                        &staging_path,
-                        replace_existing_folder,
-                    );
-                    return Err("上传已停止".to_string());
-                }
-                Err(crate::russh_transport::UploadError::Failed { message, retryable }) => {
-                    let error = UploadAttemptError::Failed {
-                        message: format!("上传失败：{}", humanize_upload_error_message(&message)),
-                        retryable,
-                    };
-                    if !replace_existing_folder
-                        && should_retry_upload(&error, retries, is_canceled())
-                    {
-                        remove_remote_folder_upload_artifacts(
-                            app,
-                            id,
-                            &archive_path,
-                            &staging_path,
-                            replace_existing_folder,
-                        );
-                        retries += 1;
-                        archive
-                            .file_mut()
-                            .seek(SeekFrom::Start(0))
-                            .map_err(|err| format!("无法重试文件夹上传：{err}"))?;
-                        continue;
-                    }
-                    remove_remote_folder_upload_artifacts(
-                        app,
-                        id,
-                        &archive_path,
-                        &staging_path,
-                        replace_existing_folder,
-                    );
-                    let UploadAttemptError::Failed { message, .. } = error;
-                    return Err(message);
-                }
+            )
+        };
+        match result {
+            Ok(()) => break,
+            Err(UploadAttemptError::Canceled) => {
+                clean_up();
+                return Err("上传已停止".to_string());
+            }
+            Err(error)
+                if !replace_existing_folder
+                    && should_retry_upload(&error, retries, is_canceled()) =>
+            {
+                clean_up();
+                retries += 1;
+                archive
+                    .file_mut()
+                    .seek(SeekFrom::Start(0))
+                    .map_err(|err| format!("无法重试文件夹上传：{err}"))?;
+            }
+            Err(UploadAttemptError::Failed { message, .. }) => {
+                clean_up();
+                return Err(message);
             }
         }
     }
 
     emit_progress(app, "sftp-upload-progress", transfer_id, total, total, true);
     Ok(remote_path)
-}
-
-#[derive(Debug)]
-pub(super) enum UploadAttemptError {
-    #[cfg(not(russh_backend))]
-    Canceled,
-    Failed {
-        message: String,
-        retryable: bool,
-    },
 }
 
 pub(super) fn should_retry_upload(
@@ -647,9 +496,10 @@ pub(super) fn should_retry_upload(
         )
 }
 
+/// How the system `ssh` backend performs `transport::upload_attempt`.
 #[cfg(not(russh_backend))]
 #[allow(clippy::too_many_arguments)]
-pub(super) fn openssh_upload_attempt(
+pub(crate) fn openssh_upload_attempt(
     app: &AppHandle,
     id: &str,
     remote_command: &str,
@@ -660,12 +510,12 @@ pub(super) fn openssh_upload_attempt(
     cancel_while_waiting: bool,
 ) -> Result<(), UploadAttemptError> {
     let (mut child, helper_path) =
-        spawn_remote_ex(app, id, remote_command, true, false, true, false).map_err(|message| {
-            UploadAttemptError::Failed {
+        transport::spawn_remote_ex(app, id, remote_command, true, false, true, false).map_err(
+            |message| UploadAttemptError::Failed {
                 message: format!("上传失败：{message}"),
                 retryable: false,
-            }
-        })?;
+            },
+        )?;
 
     let stderr_reader = child.stderr.take().map(|mut stderr| {
         std::thread::spawn(move || {
@@ -681,21 +531,15 @@ pub(super) fn openssh_upload_attempt(
             let _ = child.kill();
             let _ = child.wait();
             let _ = join_stderr_reader(stderr_reader);
-            cleanup_askpass_helper(helper_path.as_ref());
+            transport::cleanup_askpass_helper(helper_path.as_ref());
             return Err(UploadAttemptError::Failed {
                 message: "上传失败：无法写入 OpenSSH 上传输入".to_string(),
                 retryable: false,
             });
         }
     };
-    let progress = ProgressConfig::new(
-        app,
-        total,
-        transfer_id,
-        "sftp-upload-progress",
-        "上传已停止",
-        is_canceled,
-    );
+    let progress =
+        ProgressConfig::new(app, total, transfer_id, "sftp-upload-progress", is_canceled);
     let copy_result = copy_upload_with_progress(local, &mut stdin, progress);
     drop(stdin);
 
@@ -723,7 +567,7 @@ pub(super) fn openssh_upload_attempt(
         let _ = child.wait();
     }
     let stderr = join_stderr_reader(stderr_reader);
-    cleanup_askpass_helper(helper_path.as_ref());
+    transport::cleanup_askpass_helper(helper_path.as_ref());
 
     let status = match status {
         Ok(status) => status,
@@ -848,7 +692,6 @@ pub(super) struct ProgressConfig<'a> {
     total: u64,
     transfer_id: &'a str,
     event_name: &'a str,
-    stop_message: &'a str,
     is_canceled: &'a dyn Fn() -> bool,
 }
 
@@ -859,7 +702,6 @@ impl<'a> ProgressConfig<'a> {
         total: u64,
         transfer_id: &'a str,
         event_name: &'a str,
-        stop_message: &'a str,
         is_canceled: &'a dyn Fn() -> bool,
     ) -> Self {
         Self {
@@ -867,7 +709,6 @@ impl<'a> ProgressConfig<'a> {
             total,
             transfer_id,
             event_name,
-            stop_message,
             is_canceled,
         }
     }
@@ -977,60 +818,6 @@ pub(super) fn copy_upload_with_progress(
 }
 
 #[cfg(not(russh_backend))]
-pub(super) fn copy_with_progress(
-    reader: &mut impl Read,
-    writer: &mut impl Write,
-    progress: ProgressConfig<'_>,
-) -> io::Result<()> {
-    let mut buffer = vec![0u8; 64 * 1024];
-    let mut transferred: u64 = 0;
-    let mut last_emit = Instant::now();
-    emit_progress(
-        progress.app,
-        progress.event_name,
-        progress.transfer_id,
-        0,
-        progress.total,
-        false,
-    );
-
-    loop {
-        if (progress.is_canceled)() {
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                progress.stop_message.to_string(),
-            ));
-        }
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        if (progress.is_canceled)() {
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                progress.stop_message.to_string(),
-            ));
-        }
-        writer.write_all(&buffer[..read])?;
-        transferred += read as u64;
-
-        if last_emit.elapsed() >= Duration::from_millis(80) {
-            emit_progress(
-                progress.app,
-                progress.event_name,
-                progress.transfer_id,
-                transferred,
-                progress.total,
-                false,
-            );
-            last_emit = Instant::now();
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(not(russh_backend))]
 pub(super) fn format_upload_attempt_failure(
     status: &std::process::ExitStatus,
     stderr: &[u8],
@@ -1051,6 +838,8 @@ mod tests {
     use super::*;
     #[cfg(not(russh_backend))]
     use std::io::Cursor;
+    #[cfg(not(russh_backend))]
+    use std::process::Stdio;
     use uuid::Uuid;
 
     #[cfg(not(russh_backend))]

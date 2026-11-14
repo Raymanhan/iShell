@@ -56,6 +56,15 @@ cargo test --manifest-path src-tauri/Cargo.toml --features force-russh
 node --test tests/nativeDragGhost.test.mjs
 ```
 
+CI also runs end-to-end tests of both SSH backends, and rz/sz over a real SSH session, against throwaway local SSH servers. To run them yourself on a disposable Linux machine with `lrzsz` installed (the script creates local accounts):
+
+```bash
+sudo scripts/live-ssh-servers.sh /tmp/ishell-live > live.env
+set -a; . ./live.env; set +a
+(cd src-tauri && xvfb-run -a cargo test live_ -- --nocapture)
+node --import ./tests/register-ts.mjs --test tests/zmodemSsh.test.mjs
+```
+
 Changes to transfers, authentication, forwarding, or window handoff also need end-to-end checks with a desktop build and suitable test servers.
 
 ## Translations
@@ -81,11 +90,12 @@ The React interface calls Tauri commands over IPC. Rust manages local persistenc
 | Bulk transfer connections | Dedicated SSH connections separate from interactive traffic |
 | Remote file operations | Commands/scripts over SSH; several operations require remote Python 3; folder transfers use tar |
 | Metrics and logs | Remote shell tools and streaming processes over SSH |
-| AI assistant | OpenAI-compatible Chat Completions and model metadata, streaming tool calls, SSH tool execution, permission checks, encrypted history, and context compaction |
+| AI assistant | OpenAI-compatible Chat Completions or the Anthropic Messages API, model metadata, streaming tool calls, SSH tool execution on one or several servers, permission checks, encrypted history loaded on demand, and context compaction |
+| Terminal | Output streamed as raw bytes over a Tauri channel per pane, decoded in the session's encoding; WebGL rendering; ZMODEM (rz/sz) through zmodem.js; local shells through `portable-pty` |
 | Interface languages | Simplified Chinese, Traditional Chinese, and English with runtime switching |
-| Persistence | SQLite for profiles/history/snippets/rules, AES-256-GCM for stored credentials, WebView local storage for preferences |
+| Persistence | SQLite with versioned migrations for profiles/history/snippets/rules, AES-256-GCM for stored credentials with the master key in the OS credential store, WebView local storage for preferences |
 
-The file panel is labeled SFTP in the UI and code. Its implementation uses remote shell/Python/tar operations over SSH, so a server offering only an SFTP subsystem without shell access is not sufficient for the full file workflow. Folder uploads use Python's archive facilities; folder downloads invoke remote `tar`.
+Listing, reading, editing, renaming and deleting files use the server's SFTP subsystem. Large transfers use `tar`/`python3` over a dedicated connection where available and fall back to SFTP; servers without an SFTP subsystem fall back to shell commands.
 
 ```text
 src/
@@ -137,6 +147,20 @@ npm run tauri -- build --target x86_64-apple-darwin
 rustup target add aarch64-apple-darwin
 npm run tauri -- build --target aarch64-apple-darwin
 ```
+
+### Code signing
+
+Unsigned installers trigger Gatekeeper on macOS and SmartScreen on Windows. The release workflow signs them when these repository secrets are set, and otherwise builds unsigned installers with a warning:
+
+| Secret | Platform | Purpose |
+| --- | --- | --- |
+| `APPLE_CERTIFICATE` | macOS | Base64 of the Developer ID Application `.p12` (`base64 -i cert.p12`) |
+| `APPLE_CERTIFICATE_PASSWORD` | macOS | Password of that `.p12` |
+| `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | macOS | Notarization: Apple ID, an app-specific password, and the team ID |
+| `WINDOWS_CERTIFICATE` | Windows | Base64 of the code signing `.pfx` |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Windows | Password of that `.pfx` |
+
+On macOS the app is signed with the hardened runtime, notarized and stapled, and the DMG is signed, notarized and stapled too. On Windows the app, the NSIS installer and the MSI are signed with SHA-256 and timestamped. Each job then verifies the signatures and fails rather than publish a broken one.
 
 ## Release workflow
 

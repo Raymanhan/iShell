@@ -3,6 +3,7 @@ import { AlertCircle, Check, Copy, Eye, EyeOff, PlugZap, X } from "lucide-react"
 import { describeConnectionError } from "../features/connections/connectionError";
 import { swatches } from "../constants/theme";
 import type { ServerInput, ServerRecord } from "../types";
+import { DEFAULT_ENCODING, TERMINAL_ENCODINGS } from "../features/shell/encodings";
 
 import { t } from "../i18n";
 export type ServerForm = ServerInput & { password: string; tagsText: string };
@@ -102,6 +103,22 @@ export function ServerEditor({
                 {form.jumpServerId && (
                   <small className="field-hint">
                     {t("先连接跳板机，再从跳板机连到这台服务器；跳板机使用它自己保存的账号和密码或私钥。")}</small>
+                )}
+              </label>
+              <label className="field">
+                <span>{t("终端编码")}</span>
+                <select value={form.encoding || DEFAULT_ENCODING} onChange={(event) => update("encoding", event.target.value)}>
+                  {!TERMINAL_ENCODINGS.some((item) => item.value === (form.encoding || DEFAULT_ENCODING)) && (
+                    <option value={form.encoding ?? ""}>{form.encoding}</option>
+                  )}
+                  {TERMINAL_ENCODINGS.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {t(item.label)}
+                    </option>
+                  ))}
+                </select>
+                {(form.encoding || DEFAULT_ENCODING) !== DEFAULT_ENCODING && (
+                  <small className="field-hint">{t("终端的输出和键入都按此编码转换；文件编辑仍按 UTF-8。")}</small>
                 )}
               </label>
             </section>

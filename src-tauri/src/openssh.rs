@@ -54,15 +54,97 @@ pub fn ssh_binary() -> String {
     }
 }
 
+/// Unix socket paths are limited to about 104 bytes (macOS) or 108 (Linux).
 #[cfg(not(russh_backend))]
-pub fn control_path(server_id: &str) -> PathBuf {
-    let slug: String = server_id
+const MAX_SOCKET_PATH: usize = 100;
+/// `<slug>-<fingerprint>.sock`: a 10-character slug and 12 hex digits.
+#[cfg(not(russh_backend))]
+const SOCKET_NAME_LEN: usize = 10 + 1 + 12 + ".sock".len();
+/// A master `ssh` first listens on `<ControlPath>.<16 random characters>` and
+/// renames it into place, so that longer path must fit too.
+#[cfg(not(russh_backend))]
+const SSH_TEMP_SUFFIX_LEN: usize = 1 + 16;
+/// The longest socket path `ssh` creates for a socket in `dir`.
+#[cfg(not(russh_backend))]
+fn longest_socket_path(dir: &Path) -> usize {
+    dir.as_os_str().len() + 1 + SOCKET_NAME_LEN + SSH_TEMP_SUFFIX_LEN
+}
+
+/// Make `dir` a directory only this user can enter, or report that it is not
+/// one: a symlink, someone else's directory, or one others can write to.
+#[cfg(not(russh_backend))]
+fn private_dir(dir: &Path) -> bool {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    if longest_socket_path(dir) > MAX_SOCKET_PATH {
+        return false;
+    }
+    let _ = fs::DirBuilder::new().mode(0o700).create(dir);
+    let Ok(metadata) = fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+        return false;
+    }
+    metadata.mode() & 0o077 == 0
+        || fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).is_ok()
+}
+
+/// The directory holding ControlMaster sockets: the session's runtime
+/// directory where there is one, otherwise a per-user directory under the
+/// temporary directory. Never a shared, world-writable location, where
+/// another local user could plant a socket under a predictable name.
+#[cfg(not(russh_backend))]
+fn control_dir() -> Option<PathBuf> {
+    let uid = unsafe { libc::geteuid() };
+    let mut candidates = Vec::new();
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty()) {
+        candidates.push(PathBuf::from(runtime).join("ishell"));
+    }
+    candidates.push(std::env::temp_dir().join(format!("ishell-{uid}")));
+    candidates.push(PathBuf::from(format!("/tmp/ishell-{uid}")));
+    candidates.into_iter().find(|dir| private_dir(dir))
+}
+
+/// The ControlMaster socket for a server, or `None` when no private directory
+/// is available and connections cannot be shared safely.
+///
+/// The name includes a fingerprint of everything that decides where and as
+/// whom the connection logs in. A master connection outlives its last client
+/// (`ControlPersist`), so after a server is edited its old connection must not
+/// be picked up again by name: commands would keep reaching the old host or
+/// account.
+#[cfg(not(russh_backend))]
+pub fn control_path(server: &ServerRecord) -> Option<PathBuf> {
+    use sha2::{Digest, Sha256};
+
+    let slug: String = server
+        .id
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
-        .take(18)
+        .take(10)
         .collect();
     let slug = if slug.is_empty() { "server" } else { &slug };
-    PathBuf::from(format!("/tmp/ishell-{slug}.sock"))
+    let mut hasher = Sha256::new();
+    for part in [
+        server.id.as_str(),
+        server.host.as_str(),
+        &server.port.to_string(),
+        server.username.as_str(),
+        server.auth_type.as_str(),
+        server.key_path.as_deref().unwrap_or_default(),
+        server.jump_server_id.as_deref().unwrap_or_default(),
+    ] {
+        // Length-prefixed, so ("ab", "c") and ("a", "bc") differ.
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let fingerprint: String = digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Some(control_dir()?.join(format!("{slug}-{fingerprint}.sock")))
 }
 
 /// `multiplex = true` shares one `ControlMaster` connection with the terminal
@@ -74,8 +156,7 @@ pub fn control_path(server_id: &str) -> PathBuf {
 /// on a shared socket.
 #[cfg(not(russh_backend))]
 pub fn common_ssh_args(server: &ServerRecord, multiplex: bool) -> Vec<String> {
-    let mut args = if multiplex {
-        let control_path = control_path(&server.id);
+    let mut args = if let Some(control_path) = control_path(server).filter(|_| multiplex) {
         vec![
             "-o".into(),
             "ControlMaster=auto".into(),
@@ -360,6 +441,7 @@ mod tests {
             color: String::new(),
             notes: String::new(),
             jump_server_id: None,
+            encoding: "UTF-8".into(),
             sort_order: 0,
             created_at: 0,
             updated_at: 0,
@@ -393,6 +475,81 @@ mod tests {
                 .trim_end()
                 .to_string()
         })
+    }
+
+    #[test]
+    fn control_sockets_live_in_a_private_directory() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let target = server("3f2a-77c1/../x-long-id", "10.0.0.10", "app", "password");
+        let path = control_path(&target).unwrap();
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("3f2a77c1xl-") && name.ends_with(".sock"),
+            "{name}"
+        );
+        assert_eq!(name.len(), SOCKET_NAME_LEN);
+        assert!(path.as_os_str().len() + SSH_TEMP_SUFFIX_LEN <= MAX_SOCKET_PATH);
+        assert_eq!(
+            control_path(&target),
+            Some(path.clone()),
+            "stable for a server"
+        );
+
+        // Any change to where or as whom it logs in gives a new connection.
+        let edits: [fn(&mut ServerRecord); 5] = [
+            |s| s.host = "10.0.0.11".into(),
+            |s| s.port = 2222,
+            |s| s.username = "root".into(),
+            |s| s.key_path = Some("~/.ssh/other".into()),
+            |s| s.jump_server_id = Some("bastion".into()),
+        ];
+        for edit in edits {
+            let mut edited = target.clone();
+            edit(&mut edited);
+            assert_ne!(control_path(&edited), Some(path.clone()));
+        }
+        // Cosmetic edits keep sharing it.
+        let mut renamed = target.clone();
+        renamed.name = "renamed".into();
+        renamed.notes = "notes".into();
+        assert_eq!(control_path(&renamed), Some(path.clone()));
+        let dir = fs::metadata(path.parent().unwrap()).unwrap();
+        assert!(dir.is_dir());
+        assert_eq!(dir.uid(), unsafe { libc::geteuid() });
+        assert_eq!(dir.permissions().mode() & 0o077, 0);
+
+        // A directory open to others is locked down before use; a symlink is refused.
+        // Under /tmp with a short name: the socket path limit applies, and
+        // macOS's per-user temporary directory is already about 50 bytes long.
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let base = PathBuf::from(format!("/tmp/ictl-{}", &id[..8]));
+        fs::create_dir_all(&base).unwrap();
+        let open = base.join("open");
+        fs::create_dir(&open).unwrap();
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(private_dir(&open));
+        assert_eq!(
+            fs::metadata(&open).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&open, &link).unwrap();
+        assert!(!private_dir(&link));
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_long_temporary_directory_is_not_used_for_sockets() {
+        // macOS's per-user temporary directory. A socket under it fits, but
+        // the temporary name `ssh` listens on first does not ("unix_listener:
+        // path ... too long for Unix domain socket").
+        let macos = Path::new("/var/folders/xy/abcdefghijklmnopqrstuvwx0000gn/T/ishell-501");
+        assert!(macos.as_os_str().len() + 1 + SOCKET_NAME_LEN <= MAX_SOCKET_PATH);
+        assert!(longest_socket_path(macos) > MAX_SOCKET_PATH);
+        assert!(!private_dir(macos));
+        // The fallback under /tmp has room to spare.
+        assert!(longest_socket_path(Path::new("/tmp/ishell-501")) <= MAX_SOCKET_PATH);
     }
 
     #[test]

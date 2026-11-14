@@ -19,6 +19,7 @@ export const defaultForm: ServerForm = {
   color: swatches[0],
   notes: "",
   jumpServerId: null,
+  encoding: "UTF-8",
   password: "",
 };
 
@@ -43,6 +44,7 @@ export function serverInputFromForm(form: ServerForm): ServerInput {
     color: form.color,
     notes: form.notes,
     jumpServerId: form.jumpServerId || null,
+    encoding: form.encoding || "UTF-8",
   };
 }
 
@@ -60,6 +62,7 @@ export function serverInputFromRecord(server: ServerRecord): ServerInput {
     color: server.color,
     notes: server.notes,
     jumpServerId: server.jumpServerId ?? null,
+    encoding: server.encoding ?? null,
     sortOrder: server.sortOrder,
   };
 }

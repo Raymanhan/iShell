@@ -17,6 +17,9 @@ pub struct ServerRecord {
     /// Another saved server to connect through (ProxyJump), if any.
     #[serde(default)]
     pub jump_server_id: Option<String>,
+    /// The terminal's character encoding, e.g. `UTF-8` or `GBK`.
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
     #[serde(default)]
     pub sort_order: u64,
     pub created_at: u64,
@@ -40,6 +43,8 @@ pub struct ServerInput {
     pub notes: String,
     #[serde(default)]
     pub jump_server_id: Option<String>,
+    #[serde(default)]
+    pub encoding: Option<String>,
     #[serde(default)]
     pub sort_order: Option<u64>,
 }
@@ -203,7 +208,7 @@ pub struct ProcessSamplePayload {
     pub sampled_at: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerStatus {
     pub id: String,
@@ -229,7 +234,7 @@ pub struct ServerStatus {
     pub sampled_at: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkSample {
     pub rx_bytes: u64,
@@ -237,7 +242,7 @@ pub struct NetworkSample {
     pub sampled_at: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiskMount {
     pub filesystem: String,
@@ -292,32 +297,6 @@ pub struct TailStatusPayload {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalDataPayload {
-    pub session_id: String,
-    pub offset: usize,
-    pub data: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalReadyPayload {
-    pub session_id: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalSnapshotPayload {
-    pub data: String,
-    pub start_offset: usize,
-    pub end_offset: usize,
-    pub ready: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalClosedPayload {
-    pub session_id: String,
-    pub reason: String,
+fn default_encoding() -> String {
+    crate::encoding::DEFAULT.into()
 }

@@ -1,7 +1,10 @@
-import { useState, type KeyboardEvent } from "react";
+import { useEffect, useState, type KeyboardEvent } from "react";
 import { Download, Droplets, Info, Languages, Layers, Palette, RefreshCw, Sparkles, SquareTerminal, X } from "lucide-react";
+import { command, isTauri } from "../api/tauri";
 import { AiSettings } from "./AiSettings";
 import { ReleaseHistory } from "./ReleaseHistory";
+import { TerminalFontSettings } from "./TerminalFontSettings";
+import type { TerminalFontWeight, TerminalTextRendering } from "../features/settings/terminalFonts";
 import type { AiConfig } from "../features/ai/types";
 import {
   clampTailViewerLines,
@@ -39,15 +42,23 @@ export function SettingsModal({
   theme,
   windowTransparency,
   terminalFontSize,
+  terminalFontFamily,
+  terminalFontWeight,
+  terminalTextRendering,
   tailViewerDefaultLines,
   autoHideTopBar,
+  gpuRendering,
   updater,
   autoCheckUpdates,
   onThemeChange,
   onWindowTransparencyChange,
   onTerminalFontSizeChange,
+  onTerminalFontFamilyChange,
+  onTerminalFontWeightChange,
+  onTerminalTextRenderingChange,
   onTailViewerDefaultLinesChange,
   onAutoHideTopBarChange,
+  onGpuRenderingChange,
   onAutoCheckUpdatesChange,
   onCheckUpdates,
   onInstallUpdate,
@@ -59,15 +70,23 @@ export function SettingsModal({
   theme: AppTheme;
   windowTransparency: number;
   terminalFontSize: number;
+  terminalFontFamily: string;
+  terminalFontWeight: TerminalFontWeight;
+  terminalTextRendering: TerminalTextRendering;
   tailViewerDefaultLines: number;
   autoHideTopBar: boolean;
+  gpuRendering: boolean;
   updater: UpdaterState;
   autoCheckUpdates: boolean;
   onThemeChange: (theme: AppTheme) => void;
   onWindowTransparencyChange: (transparency: number) => void;
   onTerminalFontSizeChange: (size: number) => void;
+  onTerminalFontFamilyChange: (family: string) => void;
+  onTerminalFontWeightChange: (weight: TerminalFontWeight) => void;
+  onTerminalTextRenderingChange: (mode: TerminalTextRendering) => void;
   onTailViewerDefaultLinesChange: (lines: number) => void;
   onAutoHideTopBarChange: (autoHide: boolean) => void;
+  onGpuRenderingChange: (enabled: boolean) => void;
   onAutoCheckUpdatesChange: (enabled: boolean) => void;
   onCheckUpdates: () => void;
   onInstallUpdate: () => void;
@@ -271,7 +290,7 @@ export function SettingsModal({
                 <div className="settings-section">
                   <div className="settings-section-copy">
                     <h3>{t("终端文字")}</h3>
-                    <p>{t("调整 Shell 内容的字号，已打开的会话会立即生效。")}</p>
+                    <p>{t("调整 Shell 内容的字体、字号和渲染方式，已打开的会话会立即生效。")}</p>
                   </div>
 
                   <label className="settings-range">
@@ -285,6 +304,28 @@ export function SettingsModal({
                       onChange={(event) => onTerminalFontSizeChange(Number(event.target.value))}
                     />
                     <strong>{terminalFontSize}px</strong>
+                  </label>
+
+                  <TerminalFontSettings
+                    fontFamily={terminalFontFamily}
+                    fontWeight={terminalFontWeight}
+                    fontSize={terminalFontSize}
+                    textRendering={terminalTextRendering}
+                    onFontFamilyChange={onTerminalFontFamilyChange}
+                    onFontWeightChange={onTerminalFontWeightChange}
+                    onTextRenderingChange={onTerminalTextRenderingChange}
+                  />
+
+                  <label className="settings-toggle">
+                    <span>
+                      {t("GPU 加速渲染")}
+                      <small>{t("用 WebGL 绘制终端，大量输出时更流畅；显示异常时可关闭。对新打开的终端生效。")}</small>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={gpuRendering}
+                      onChange={(event) => onGpuRenderingChange(event.target.checked)}
+                    />
                   </label>
                 </div>
 
@@ -363,6 +404,7 @@ export function SettingsModal({
                     onChange={(event) => onAutoCheckUpdatesChange(event.target.checked)}
                   />
                 </label>
+                <SecretStorageLine />
                 <ReleaseHistory currentVersion={updater.currentVersion} update={updater.update} />
               </div>
             )}
@@ -399,4 +441,35 @@ function UpdateStatusLine({ updater }: { updater: UpdaterState }) {
   }
   if (!text) return null;
   return <small className={`settings-update-status ${tone}`}>{text}</small>;
+}
+
+/** Where the key that encrypts saved passwords and AI data is kept. */
+function SecretStorageLine() {
+  const [storage, setStorage] = useState<"keychain" | "file" | "error" | null>(null);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let cancelled = false;
+    command("secret_storage")
+      .then((value) => !cancelled && setStorage(value))
+      .catch(() => !cancelled && setStorage("error"));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!storage) return null;
+  return (
+    <div className="settings-toggle">
+      <span>
+        {t("凭据保护")}
+        <small>
+          {storage === "keychain" && t("加密主密钥保存在系统钥匙串中，拷贝数据目录无法解密已保存的密码。")}
+          {storage === "file" && t("系统钥匙串不可用，加密主密钥保存在数据目录的本地文件中（仅当前用户可读）。")}
+          {storage === "error" && t("无法读取加密主密钥，请解锁系统钥匙串并允许 iShell 访问。")}
+        </small>
+      </span>
+      <strong>{storage === "keychain" ? t("系统钥匙串") : storage === "file" ? t("本地文件") : t("不可用")}</strong>
+    </div>
+  );
 }

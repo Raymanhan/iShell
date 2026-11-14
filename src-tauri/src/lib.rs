@@ -1,19 +1,28 @@
 mod ai;
 mod clipboard;
 mod commands;
+mod encoding;
+mod error;
+// Needs real SSH servers, a display (xvfb) and XDG paths: Linux only, like CI.
+#[cfg(all(test, target_os = "linux"))]
+mod live_tests;
+mod local_shell;
 mod models;
 mod openssh;
 mod pool;
 mod process_monitor;
 #[cfg(russh_backend)]
 mod russh_transport;
+mod secrets;
 mod ssh;
 mod store;
 mod tail_monitor;
 mod telemetry;
 mod terminal;
 mod time;
+mod transport;
 mod tunnel;
+mod zmodem_files;
 
 use pool::SshPool;
 use process_monitor::ProcessMonitorRegistry;
@@ -30,6 +39,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(Arc::new(TerminalRegistry::default()))
+        .manage(zmodem_files::PickedFiles::default())
         .manage(Arc::new(SshPool))
         .manage(Arc::new(ai::AiRegistry::default()))
         .manage(Arc::new(ProcessMonitorRegistry::default()))
@@ -50,12 +60,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ai::ai_get_config,
-            ai::history::ai_get_history,
+            ai::history::ai_list_history,
+            ai::history::ai_load_history,
             ai::history::ai_save_history,
             ai::history::ai_delete_history,
             ai::ai_save_config,
             ai::ai_list_models,
             ai::ai_chat,
+            ai::ai_suggest_command,
             ai::ai_compact,
             ai::ai_cancel,
             ai::ai_approve,
@@ -67,6 +79,7 @@ pub fn run() {
             commands::delete_server,
             commands::list_command_history,
             commands::save_command_history,
+            commands::secret_storage,
             commands::list_snippets,
             commands::save_snippet,
             commands::delete_snippet,
@@ -97,10 +110,17 @@ pub fn run() {
             commands::sftp_read_text_file,
             commands::sftp_write_text_file,
             commands::open_terminal,
+            commands::attach_terminal,
+            commands::detach_terminal,
             commands::terminal_input,
             commands::terminal_paste_clipboard,
             commands::terminal_resize,
-            commands::terminal_snapshot,
+            commands::terminal_set_encoding,
+            commands::terminal_write,
+            commands::zmodem_pick_files,
+            commands::zmodem_read_file,
+            commands::zmodem_forget_files,
+            commands::zmodem_save_file,
             commands::close_terminal
         ])
         .build(tauri::generate_context!())

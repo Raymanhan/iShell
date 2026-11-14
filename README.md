@@ -37,7 +37,9 @@ Built with **Tauri 2 + React 19 + Rust**, available for Windows, macOS, and Linu
 ### 1. Built-in AI server assistant: from goals to actions and results
 
 - **Natural-language server tasks**: describe deployment, inspection, or troubleshooting work. The assistant can run Shell commands, read/write files, and generate and execute Python, Shell, or Node.js code.
-- **Your choice of model service**: use an OpenAI-compatible API, discover models and reasoning levels, or enter model IDs and `reasoning_effort` manually where needed.
+- **Your choice of model service**: use an OpenAI-compatible API or Anthropic's native Messages API (Claude, with thinking shown as summaries and a declined request continued by the recommended fallback model), discover models and reasoning levels, or enter model IDs and `reasoning_effort` manually where needed.
+- **AI in the terminal**: select output and press `⌘⇧A` (macOS) or `Ctrl+Shift+A` to ask about it; type `# what you want` at the prompt and press `⌘↩` or `Ctrl+Enter` to replace it with a generated command that is typed in, never run; tasks can read the terminal's recent output with the read-only `read_terminal` tool.
+- **Several servers in one task**: add other connected servers to a conversation, and the same command, code or file change runs on all of them in parallel, with approval cards listing every target and results shown per server.
 - **Four permission modes**: suggestions only, confirm before execution, automatic low risk, and full access. Approval cards show the target server, working directory, and full command or code.
 - **Visible steps and results**: streamed replies and grouped tool cards show descriptions, commands, code, output, success/failure states, and exit codes. You can request cancellation at any time.
 - **Context management for longer tasks**: automatic compaction follows the model's declared context window, with manual `/compact` and a command menu for `/new`, `/history`, and `/settings`.
@@ -48,7 +50,7 @@ The built-in assistant uses your configured model API and does not require an ex
 
 ### AI assistant quick start
 
-1. Open **Settings → AI Assistant**, enter an OpenAI-compatible API URL and key, discover models, and choose a default. You can also add a model ID manually.
+1. Open **Settings → AI Assistant**, choose OpenAI-compatible or Anthropic, enter the API URL and key, discover models, and choose a default. You can also add a model ID manually.
 2. Connect to a server and open the **AI sparkles button** at the top right. Select the model, reasoning effort, and permissions.
 3. Describe a goal, such as inspecting disk space and identifying large directories. Review each tool step; when approval is requested, inspect the command and allow it once or deny it.
 4. Review output and conclusions, continue through conversation history, and use `/compact` with an optional focus for longer conversations.
@@ -80,7 +82,12 @@ Screenshots are uploaded as PNGs, up to **20 MiB**, to `/tmp/ishell-clipboard-*/
 - **Interactive terminals**: xterm.js with real PTY sessions, reconnect, duplicate tabs, drag-to-reorder, detach to a new window, and handoff between windows.
 - **Up to four panes**: nest horizontal and vertical splits for the same server or different hosts. Resize dividers; file and monitoring panels follow the focused pane.
 - **Broadcast input**: mirror typing to selected sessions, with an individual toggle for each target. Useful for routine checks and side-by-side operations.
-- **Snippets and history**: save commands with notes, insert them for editing or send Enter automatically, and use them with broadcasting. Search history, get suggestions, and paste commands back into a terminal.
+- **Snippets and history**: save commands with notes, insert them for editing or send Enter automatically, and use them with broadcasting. Snippets can hold variables, `{{name}}` or `{{name:default}}`, filled in with a preview before sending. Command history is kept per server: search it, get suggestions, and paste commands back into a terminal.
+- **Command palette**: press `⌘K` or `⇧⌘P` (macOS) or `Ctrl+Shift+P` (Windows/Linux), from the terminal too, to fuzzy-search servers, open tabs, snippets and actions such as splitting, reconnecting, broadcasting and switching the encoding.
+- **Local terminal**: open a shell on this computer in a tab from the terminal icon in the top bar or the palette: a login shell on macOS and Linux, PowerShell on Windows, or the shell named by `ISHELL_LOCAL_SHELL`.
+- **Terminal encodings**: UTF-8 by default, or GBK, GB18030, Big5, Shift_JIS, EUC-KR and others per server; switch a garbled session from **Terminal encoding** in the tab menu.
+- **rz/sz (ZMODEM)**: run `sz file` on the server to save it in this computer's Downloads folder, or `rz` to pick files to upload. Progress shows in the terminal and `Ctrl+C` cancels. The server needs `lrzsz`; use the file panel for large files.
+- **Faster terminal rendering**: WebGL rendering with Unicode 11 character widths, falling back to the canvas renderer where WebGL is unavailable.
 - **Terminal search**: find output in the terminal's current scrollback with case-sensitive, whole-word, and regular-expression options.
 
 ### 3. Remote files, from transfer to configuration changes
@@ -88,7 +95,8 @@ Screenshots are uploaded as PNGs, up to **20 MiB**, to `/tmp/ishell-clipboard-*/
 - **Two browsing modes**: tree/detail and multi-column views, direct path navigation, multi-selection, context menus, mkdir, rename, and delete.
 - **Files and folders**: drag and drop uploads; download folders directly or as `.tar.gz` archives. Transfer queues show progress, bytes, and task states, with controls to stop tasks.
 - **Folder replacement safeguards**: confirm replacement of an existing remote folder; uploads use staging, commit, and rollback protection on failure.
-- **Remote text editing**: edit and save **UTF-8 text files up to 1 MiB** with built-in syntax highlighting, suitable for configurations and scripts.
+- **Remote text editing**: edit and save **UTF-8 text files up to 1 MiB** in a CodeMirror editor with syntax highlighting, search and undo history. Saving writes a temporary file and renames it into place, keeping owner and permissions; if the file changed on the server since it was opened, you are asked before overwriting.
+- **SFTP file operations**: listing, editing, renaming and deleting use the server's SFTP subsystem, so they work on hosts without Python and on SFTP-only accounts.
 - **Terminal directory handoff and symlinks**: change the active shell to a selected directory from the file menu. Link indicators and delete prompts distinguish symlinks from their targets.
 - **Open directories from the terminal**: hold `Command` (macOS) or `Ctrl` (Windows/Linux) and click a `user@host:directory` prompt to locate it in the file panel. The directory tree expands and scrolls to the current location as you navigate.
 
@@ -188,13 +196,16 @@ A typical workflow: **connect → upload files → edit configuration → verify
 | Split right | `⌘D` | `Ctrl+Shift+D` |
 | Split down | `⇧⌘D` | `Ctrl+Shift+E` |
 | Search terminal output | `⌘F` | `Ctrl+Shift+F` |
+| Command palette | `⌘K` / `⇧⌘P` | `Ctrl+Shift+P` |
+| Ask the AI about the selection | `⌘⇧A` | `Ctrl+Shift+A` |
+| Turn `# description` into a command | `⌘↩` | `Ctrl+Enter` |
 
 Explore the top bar and tab, server, and file context menus for other actions. The transparency slider preserves the theme's glass effect at 100%; 0% is fully opaque.
 
 ## Local data and credentials
 
 - **Local storage**: server profiles, command history, snippets, and forwarding rules use `ishell.db`, a SQLite database in the app data directory. Appearance preferences and similar settings use WebView local storage.
-- **Saved credentials**: passwords and private-key passphrases are encrypted with **AES-256-GCM** in the database. The master key is stored in `secret.key` in the same app data directory, with `0600` permissions on Unix. The current implementation uses a local key file.
+- **Saved credentials**: passwords and private-key passphrases are encrypted with **AES-256-GCM** in the database. The master key is kept in the OS credential store (macOS Keychain, Windows Credential Manager, Secret Service on Linux); where none is available it is stored in `secret.key` in the app data directory, with `0600` permissions on Unix. **Settings → About and updates** shows which is in use, and `ISHELL_SECRET_STORAGE=file` always uses the file.
 - **AI data**: model-service settings and API keys, conversation history, and tool results use the same local encryption mechanism and are excluded from connection exports. Built-in AI requests send task messages, necessary server information, and tool output to your configured model service.
 - **Exports**: leave the export passphrase empty to export profiles only. With a passphrase, credentials are encrypted with AES-256-GCM using a PBKDF2-HMAC-SHA256-derived key. Profile metadata such as names and addresses remains readable. Private-key files themselves are not bundled.
 - **Host keys**: the first connection automatically trusts and records the server key; subsequent connections check the recorded key and reject changed keys.
@@ -226,6 +237,11 @@ The Chinese [project analysis and promotion notes](docs/PROJECT_ANALYSIS.zh-CN.m
 
 <details>
 <summary>Expand release history</summary>
+
+- `v1.7.2` makes terminal text sharper on light themes on Windows and adds terminal font settings: a new text rendering option draws the terminal on a solid background so ClearType applies (on by default on Windows and macOS for every theme), and Settings > Terminal now offers suggested screen fonts, a custom font, a font weight and a live preview.
+- `v1.7.1` fixes macOS terminals that closed right after connecting with `unix_listener: ... too long for Unix domain socket`: the shared-connection socket now goes in a short folder when the system temporary folder is too long for it.
+
+- `v1.7.0` adds a command palette (`⌘K` / `⇧⌘P`, or `Ctrl+Shift+P`), local terminal tabs, per-server terminal encodings with a per-session switch in the tab menu, and rz/sz (ZMODEM) transfers in the terminal. The AI assistant can talk to Claude through Anthropic's native Messages API, explain selected terminal output, turn `# description` at the prompt into a command that is typed in but not run, read the terminal's recent output, and run one task on several connected servers in parallel. Snippets can hold `{{variables}}`, and command history is kept per server. Terminals render with WebGL, the file editor is now CodeMirror with conflict detection and atomic saves, and file operations use real SFTP. Encryption keys move to the OS credential store, the local database uses versioned migrations, AI history opens conversations on demand, and terminal output streams as raw bytes. OpenSSH terminals start with `ssh -e none`, so `~.` in output can no longer end a session.
 
 - `v1.6.1` shows connection-test failures in full. Instead of one truncated line next to the buttons, the server editor shows the likely cause (wrong credentials, timeout, connection refused, unknown host, changed host key, unreadable private key, unreachable network, or connection closed by the server), what to check, and the complete SSH output, which wraps and can be copied. Terminal tabs no longer slide under the toolbar when many are open: the tab strip leaves room for the buttons on both sides, tabs keep a readable width, and the strip scrolls sideways with the active tab kept in view. The "Save AI settings" button moves to the top of the AI settings page, next to the section title, with its messages shown right below it.
 

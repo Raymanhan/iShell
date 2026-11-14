@@ -110,7 +110,7 @@ export function useUploadQueue({
     inFlightIdsRef.current.add(item.id);
     try {
       if (canceledIdsRef.current.has(item.id)) return;
-      await command<string>("sftp_upload", {
+      await command("sftp_upload", {
         id: item.serverId,
         localPath: item.localPath,
         remoteDir: item.remoteDir,
