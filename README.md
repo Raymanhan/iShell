@@ -67,10 +67,13 @@ Task messages, necessary server information, and tool output are sent to your co
 - **Run an AI CLI on the project host**: SSH into your remote project directory and launch an installed, configured Codex or Claude Code CLI to work with that host's code and runtime environment.
 - **Keep AI sessions and verification side by side**: use up to four panes for an AI conversation, `git diff`, tests, and service logs. You can also launch separate sessions in different project directories and arrange tabs and windows by task.
 - **Light and dark styling for AI CLIs**: answer terminal background queries with the current theme's actual surface color, allowing tools such as Codex and Claude Code to select their styling and improving readability with transparent windows and light themes.
+- **Paste screenshots into remote CLIs**: copy a local screenshot and paste in the terminal with `⌘V` (macOS), `Win+V` / `Ctrl+V` (Windows), or `Ctrl+Shift+V` (Linux). iShell uploads the screenshot to the connected server and inserts its absolute remote path. Text still pastes as text; image paths stay in the initiating pane, bypass broadcast, and are never submitted automatically.
 - **Check changes and results in the same workbench**: inspect small configurations and scripts in the file panel, run tests in another pane, and observe runtime results through log windows and host metrics.
 - **Observe remote AI workloads**: follow training or inference logs and inspect process rankings and available GPU/VRAM metrics. GPU metrics require compatible remote interfaces.
 
 Install, authenticate, and configure these external AI CLIs on the remote host; you operate each CLI session independently.
+
+Screenshots are uploaded as PNGs, up to **20 MiB**, to `/tmp/ishell-clipboard-*/screenshot.png`, with directory and file permissions restricted to the SSH user. Failed uploads remove partial files. The next screenshot upload attempts to remove that user's screenshot directories older than seven days; you can also delete them in the file panel. The server needs `sh`, `mktemp`, `cat`, and `wc`. If you SSH onward to another host or enter a container, uploads still target the server directly connected to iShell; transfer the image into that environment separately.
 
 ### 2. Multiple sessions, less repeated typing
 

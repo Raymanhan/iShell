@@ -42,6 +42,8 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+arboard = { version = "3", features = ["wayland-data-control"] }
+png = "0.18"
 
 [features]
 # Force the russh transport on a non-Windows host (for development/testing).

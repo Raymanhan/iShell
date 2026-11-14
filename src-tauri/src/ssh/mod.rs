@@ -29,6 +29,7 @@ use crate::{
 };
 
 mod archive;
+mod clipboard;
 mod download;
 mod monitor;
 mod remote;
@@ -37,6 +38,7 @@ mod upload;
 mod upload_scripts;
 
 use archive::*;
+pub use clipboard::*;
 pub use download::*;
 pub use monitor::*;
 pub use remote::*;

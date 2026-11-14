@@ -811,6 +811,17 @@ pub fn terminal_input(
 }
 
 #[tauri::command]
+pub async fn terminal_paste_clipboard(
+    app: AppHandle,
+    registry: State<'_, Arc<TerminalRegistry>>,
+    id: String,
+    session_id: String,
+) -> Result<crate::clipboard::ClipboardPaste, String> {
+    let registry = registry.inner().clone();
+    run_blocking(move || crate::clipboard::paste_clipboard(&app, &registry, &id, &session_id)).await
+}
+
+#[tauri::command]
 pub fn terminal_resize(
     registry: State<'_, Arc<TerminalRegistry>>,
     session_id: String,

@@ -1,4 +1,5 @@
 mod ai;
+mod clipboard;
 mod commands;
 mod models;
 mod openssh;
@@ -97,6 +98,7 @@ pub fn run() {
             commands::sftp_write_text_file,
             commands::open_terminal,
             commands::terminal_input,
+            commands::terminal_paste_clipboard,
             commands::terminal_resize,
             commands::terminal_snapshot,
             commands::close_terminal

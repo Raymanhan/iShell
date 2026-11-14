@@ -8,6 +8,7 @@ import { command, isTauri } from "../api/tauri";
 import { getTerminalSurfaceReport, getTerminalTheme, type AppTheme } from "../constants/theme";
 import { splitShortcutDirection, type PaneRect, type SplitDirection } from "../features/shell/panes";
 import { directoryLinkProvider } from "../features/shell/directoryLinks";
+import { createClipboardPasteHandler, imagePasteData, isTerminalPasteShortcut, type ClipboardPaste } from "../features/shell/clipboard";
 import type { ShellTab } from "../features/shell/types";
 import { isTerminalSearchShortcut, TerminalSearchBar } from "./TerminalSearchBar";
 import type {
@@ -462,7 +463,46 @@ function TerminalPaneBase({
     terminal.writeln(`iShell · ${tab.title}`);
     terminal.writeln("");
 
+    let disposed = false;
+    const pasteClipboard = createClipboardPasteHandler({
+      getSession: () => {
+        const sessionId = sessionRef.current;
+        return sessionId && closedSessionRef.current !== sessionId
+          ? { sessionId, serverId: tab.serverId }
+          : null;
+      },
+      isDisposed: () => disposed,
+      readClipboard: ({ sessionId, serverId }) => command<ClipboardPaste>("terminal_paste_clipboard", {
+        sessionId, id: serverId,
+      }),
+      pasteText: (text) => {
+        closeHistorySuggest();
+        terminal.paste(text);
+      },
+      pasteImage: (path) => {
+        closeHistorySuggest();
+        // A remote path is only valid on this host. Bypass broadcast input.
+        rawSendTerminalInput(imagePasteData(path, terminal.modes.bracketedPasteMode), false);
+      },
+      setNotice,
+    });
+    // Covers native menu/context-menu paste as well as keyboard shortcuts.
+    // Capture before xterm's text-only paste handler to prevent double pastes.
+    const container = containerRef.current;
+    const onPaste = (event: ClipboardEvent) => {
+      if (!isTauri) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void pasteClipboard();
+    };
+    container.addEventListener("paste", onPaste, true);
+
     terminal.attachCustomKeyEventHandler((event) => {
+      if (isTauri && isTerminalPasteShortcut(event, isWindowsPlatform)) {
+        event.preventDefault();
+        void pasteClipboard();
+        return false;
+      }
       const splitDirection = splitShortcutDirection(event);
       if (splitDirection && onSplitRef.current) {
         onSplitRef.current(splitDirection);
@@ -527,7 +567,6 @@ function TerminalPaneBase({
 
     terminal.onData((data) => sendTerminalInput(data));
 
-    let disposed = false;
     let fitFrame = 0;
     let settledFrame = 0;
     const fitWhenVisible = () => {
@@ -595,6 +634,7 @@ function TerminalPaneBase({
 
     return () => {
       disposed = true;
+      container.removeEventListener("paste", onPaste, true);
       requestFitRef.current = null;
       cancelAnimationFrame(fitFrame);
       cancelAnimationFrame(settledFrame);
