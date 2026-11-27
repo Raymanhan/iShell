@@ -1884,12 +1884,14 @@ button.detail-row:hover {
 }
 .danger-button {
   gap: 0;
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
   background: transparent;
   color: var(--danger);
   font-weight: 560;
 }
 .danger-button:hover:not(:disabled) {
-  background: rgba(245, 107, 107, 0.2);
+  border-color: color-mix(in srgb, var(--danger) 65%, transparent);
+  background: var(--danger-hover-bg);
 }
 .danger-button:disabled {
   opacity: 0.45;
