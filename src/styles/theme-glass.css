@@ -317,11 +317,6 @@
 :root[data-theme="glass"] .server-editor-sheet .auth-switch button.active {
   background: rgba(var(--accent-rgb), 0.075);
 }
-:root[data-theme="glass"] .server-editor-sheet .danger-button {
-  border-color: transparent;
-  background: transparent;
-}
-
 /* ===== Liquid glass family =====
    Every liquid theme shares one surface recipe and differs only in tokens.
    The family is deliberately restrained: deep, low-chroma grounds, a single
@@ -940,11 +935,6 @@
 :root[data-theme^="liquid-glass"] .server-editor-sheet .editor-actions {
   border-color: rgba(var(--liquid-line-rgb), 0.1);
   background: rgba(255, 255, 255, 0.025);
-}
-
-:root[data-theme^="liquid-glass"] .server-editor-sheet .danger-button {
-  border-color: transparent;
-  background: transparent;
 }
 
 /* Dusk (暮霭紫): Otty-style dark. Violet-gray chrome, deep cards and soft
